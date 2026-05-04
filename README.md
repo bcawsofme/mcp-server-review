@@ -237,6 +237,10 @@ place to manage upgrades.
 This repository includes a hosted webhook service implementation. See
 [Hosted Service](docs/hosted-service.md).
 
+The hosted service now includes GitHub App token support, SQLite-backed job
+state, webhook idempotency, repository-level config, and update-in-place PR
+comments.
+
 ## Expanding Beyond PR Review
 
 This server now includes a generated build and release tool catalog. The tools
@@ -333,6 +337,12 @@ printf '%s\n' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
   '{"jsonrpc":"2.0","id":3,"method":"prompts/list","params":{}}' \
   | python3 -m build_release_mcp
+```
+
+Run unit tests:
+
+```sh
+python3 -m unittest discover -s tests
 ```
 
 ## Notes

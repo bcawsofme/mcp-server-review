@@ -5,8 +5,8 @@ sends pull request events to the service, the service verifies the webhook
 signature, queues a background review job, runs the existing review runner, and
 posts the result back to the PR.
 
-This is the simplest hosted implementation. It uses `GH_TOKEN` for GitHub API
-access instead of implementing a full GitHub App installation-token flow.
+The service supports either a `GH_TOKEN`/`GITHUB_TOKEN` or GitHub App
+installation tokens. GitHub App auth is preferred for multi-repo hosting.
 
 ## Flow
 
@@ -15,23 +15,28 @@ GitHub pull_request webhook
   -> POST /webhooks/github
   -> HMAC signature verification
   -> action/repo/fork/draft filtering
+  -> SQLite idempotency check
   -> background review job
+  -> optional repo config from .build-release-mcp.yml
   -> MCP PR tools collect context
   -> OpenAI Responses API reviews context
-  -> gh pr comment posts result
+  -> previous bot comment is updated, or a new comment is posted
 ```
 
 ## Run
 
 ```sh
 GITHUB_WEBHOOK_SECRET=... \
-GH_TOKEN=... \
+GITHUB_APP_ID=... \
+GITHUB_APP_PRIVATE_KEY_FILE=/run/secrets/github-app.pem \
 OPENAI_API_KEY=... \
 HOSTED_SERVICE_ALLOWED_REPOS=OWNER/REPO \
 python3 -m build_release_mcp.hosted_service
 ```
 
 The service listens on `0.0.0.0:8080` by default.
+
+For local testing, `GH_TOKEN=...` is also supported.
 
 ## Endpoints
 
@@ -47,7 +52,7 @@ Required:
 
 - `GITHUB_WEBHOOK_SECRET`
 - `OPENAI_API_KEY`
-- `GH_TOKEN`
+- `GH_TOKEN` / `GITHUB_TOKEN`, or GitHub App credentials
 
 ### `POST /webhooks/github`
 
@@ -71,12 +76,18 @@ It ignores draft PRs and fork PRs by default.
 
 ### `GET /jobs/<job_id>`
 
-Returns in-memory job status for a queued review.
+Returns SQLite-backed job status for a queued review.
 
 ## Environment Variables
 
 - `GITHUB_WEBHOOK_SECRET`: required webhook HMAC secret.
-- `GH_TOKEN`: required token used by `gh` to read PRs and post comments.
+- `GH_TOKEN` or `GITHUB_TOKEN`: optional token used by `gh` to read PRs and
+  post comments. Useful for local testing.
+- `GITHUB_APP_ID`: GitHub App ID. Required for GitHub App auth.
+- `GITHUB_APP_PRIVATE_KEY`: GitHub App private key text. Use `\n` escapes if
+  storing it as a single-line environment variable.
+- `GITHUB_APP_PRIVATE_KEY_FILE`: path to a PEM private key file. Preferred over
+  `GITHUB_APP_PRIVATE_KEY` for deployment.
 - `OPENAI_API_KEY`: required model API key.
 - `OPENAI_MODEL`: optional, defaults to `gpt-5`.
 - `OPENAI_BASE_URL`: optional, defaults to `https://api.openai.com/v1`.
@@ -85,11 +96,73 @@ Returns in-memory job status for a queued review.
 - `HOSTED_SERVICE_ALLOW_FORKS`: optional, defaults to `false`.
 - `HOSTED_SERVICE_HOST`: optional, defaults to `0.0.0.0`.
 - `HOSTED_SERVICE_WORKERS`: optional, defaults to `1`.
+- `HOSTED_SERVICE_DB`: optional SQLite DB path, defaults to
+  `/tmp/build-release-mcp/jobs.sqlite3`.
 - `PORT`: optional, defaults to `8080`.
 - `BUILD_RELEASE_MCP_REPO_ROOT`: optional checkout path used as the working
   directory for local scans and `gh`.
 - `AI_REVIEW_MAX_DIFF_BYTES`: optional, defaults to `180000`.
 - `AI_REVIEW_MAX_OUTPUT_TOKENS`: optional, defaults to `1800`.
+
+## GitHub App Setup
+
+Create a GitHub App with:
+
+- Webhook URL: `https://YOUR_HOST/webhooks/github`
+- Webhook secret: same value as `GITHUB_WEBHOOK_SECRET`
+- Repository permissions:
+  - Contents: read
+  - Pull requests: read/write
+  - Issues: read/write
+  - Metadata: read
+- Subscribe to Pull request events.
+
+Install the app on the repositories you want to review. The webhook payload
+contains an installation ID; the service uses that ID to mint a short-lived
+installation token for each job.
+
+The GitHub App path requires `openssl` at runtime to sign the JWT using the app
+private key.
+
+## Repository Config
+
+Each target repository can define `.build-release-mcp.yml`:
+
+```yaml
+model: gpt-5
+
+pr_review:
+  enabled: true
+  max_diff_bytes: 180000
+  ignored_paths:
+    - docs/**
+    - "*.md"
+```
+
+Supported keys:
+
+- `model`: default model for review.
+- `pr_review.enabled`: disable automated PR review when `false`.
+- `pr_review.max_diff_bytes`: max diff bytes collected for the model.
+- `pr_review.ignored_paths`: path globs to omit from the changed-file summary.
+
+An example is included at `.build-release-mcp.example.yml`.
+
+## Idempotency
+
+The SQLite job store deduplicates by:
+
+- GitHub webhook delivery ID.
+- Repository + PR number + PR head SHA.
+
+This prevents duplicate reviews when GitHub retries a delivery or when multiple
+events arrive for the same PR commit.
+
+## Comment Updates
+
+Review comments include a hidden marker. When the runner posts a new result, it
+first looks for an existing marker comment and updates it in place. If no marker
+comment exists, it creates a new PR comment.
 
 ## Deployment Notes
 
@@ -99,18 +172,27 @@ load balancer. Do not expose it without webhook signature verification.
 Start with a narrow `HOSTED_SERVICE_ALLOWED_REPOS` allowlist. Use a token with
 only the permissions needed to read PRs and write PR comments.
 
-This implementation stores job state in memory. If you need durable job history,
-multiple replicas, retries, or audit trails, move the queue and job store to a
-database or managed queue.
+This implementation uses an in-process queue. SQLite makes job state durable,
+but multiple service replicas should use a real queue or ensure only one worker
+process consumes jobs.
 
-## Future GitHub App Version
+## Docker
 
-The next maturity step is replacing `GH_TOKEN` with a GitHub App flow:
+Build:
 
-1. Verify webhook signatures the same way.
-2. Read the installation ID from the webhook payload.
-3. Mint an installation access token for that repo.
-4. Run `gh` or GitHub API calls with that installation token.
+```sh
+docker build -t build-release-mcp-server .
+```
 
-That makes org-wide installation and permission management cleaner than a shared
-PAT-style token.
+Run:
+
+```sh
+docker run --rm -p 8080:8080 \
+  -e GITHUB_WEBHOOK_SECRET=... \
+  -e GITHUB_APP_ID=... \
+  -e GITHUB_APP_PRIVATE_KEY_FILE=/run/secrets/github-app.pem \
+  -e OPENAI_API_KEY=... \
+  -e HOSTED_SERVICE_ALLOWED_REPOS=OWNER/REPO \
+  -v "$PWD/secrets:/run/secrets:ro" \
+  build-release-mcp-server
+```

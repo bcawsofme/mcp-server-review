@@ -12,6 +12,9 @@ license = { file = "LICENSE" }
 authors = [{ name = "Your Name" }]
 dependencies = []
 
+[project.optional-dependencies]
+dev = []
+
 [project.scripts]
 build-release-mcp = "build_release_mcp.server:main"
 build-release-mcp-review = "build_release_mcp.review_runner:main"

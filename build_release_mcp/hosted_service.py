@@ -9,15 +9,17 @@ import os
 import queue
 import sys
 import threading
-import time
-import uuid
-from dataclasses import asdict, dataclass
+import argparse
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from .review_runner import RunnerError, run_review
+from .config import ConfigError, load_repo_config, review_max_diff_bytes
+from .github_auth import GitHubAuthError, has_github_app_config, resolve_token
+from .job_store import JobStore
+from .review_runner import RunnerError, review_hash, run_review
 
 
 MAX_BODY_BYTES = 5 * 1024 * 1024
@@ -25,25 +27,8 @@ DEFAULT_PORT = 8080
 PR_ACTIONS = {"opened", "synchronize", "reopened", "ready_for_review"}
 
 
-@dataclass
-class ReviewJob:
-    id: str
-    pr_url: str
-    repo: str
-    action: str
-    status: str
-    created_at: float
-    updated_at: float
-    error: str | None = None
-
-
-jobs: dict[str, ReviewJob] = {}
 work_queue: "queue.Queue[str]" = queue.Queue()
-jobs_lock = threading.Lock()
-
-
-def now() -> float:
-    return time.time()
+store = JobStore(os.environ.get("HOSTED_SERVICE_DB", "/tmp/build-release-mcp/jobs.sqlite3"))
 
 
 def env_bool(name: str, default: bool = False) -> bool:
@@ -62,9 +47,19 @@ def max_diff_bytes() -> int:
     return int(os.environ.get("AI_REVIEW_MAX_DIFF_BYTES", "180000"))
 
 
+def has_github_auth_config() -> bool:
+    return bool(os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or has_github_app_config())
+
+
 def required_env_missing() -> list[str]:
-    names = ["GITHUB_WEBHOOK_SECRET", "OPENAI_API_KEY", "GH_TOKEN"]
-    return [name for name in names if not os.environ.get(name)]
+    missing = []
+    if not os.environ.get("GITHUB_WEBHOOK_SECRET"):
+        missing.append("GITHUB_WEBHOOK_SECRET")
+    if not os.environ.get("OPENAI_API_KEY"):
+        missing.append("OPENAI_API_KEY")
+    if not has_github_auth_config():
+        missing.append("GH_TOKEN or GitHub App credentials")
+    return missing
 
 
 def verify_signature(secret: str, body: bytes, signature: str | None) -> bool:
@@ -75,48 +70,42 @@ def verify_signature(secret: str, body: bytes, signature: str | None) -> bool:
     return hmac.compare_digest(expected, signature)
 
 
-def enqueue_review(pr_url: str, repo: str, action: str) -> ReviewJob:
-    job = ReviewJob(
-        id=str(uuid.uuid4()),
-        pr_url=pr_url,
-        repo=repo,
-        action=action,
-        status="queued",
-        created_at=now(),
-        updated_at=now(),
-    )
-    with jobs_lock:
-        jobs[job.id] = job
-    work_queue.put(job.id)
-    return job
-
-
-def update_job(job_id: str, status: str, error: str | None = None) -> None:
-    with jobs_lock:
-        job = jobs[job_id]
-        job.status = status
-        job.error = error
-        job.updated_at = now()
+def _job_env(token: str) -> dict[str, str]:
+    env = {"GH_TOKEN": token, "GITHUB_TOKEN": token}
+    if repo_root := os.environ.get("BUILD_RELEASE_MCP_REPO_ROOT"):
+        env["BUILD_RELEASE_MCP_REPO_ROOT"] = repo_root
+    return env
 
 
 def worker() -> None:
     while True:
         job_id = work_queue.get()
-        with jobs_lock:
-            job = jobs[job_id]
+        job = store.get(job_id)
+        if job is None:
+            work_queue.task_done()
+            continue
         try:
-            update_job(job_id, "running")
-            run_review(job.pr_url, post=True, max_diff_bytes=max_diff_bytes())
-            update_job(job_id, "completed")
-        except (RunnerError, Exception) as exc:
-            update_job(job_id, "failed", str(exc))
+            store.update(job.id, "running")
+            token = resolve_token(job.installation_id)
+            env = _job_env(token)
+            config = load_repo_config(job.repo, job.head_sha, env=env)
+            body = run_review(
+                job.pr_url,
+                post=True,
+                max_diff_bytes=review_max_diff_bytes(config, max_diff_bytes()),
+                extra_env=env,
+                config=config,
+            )
+            store.update(job.id, "completed", review_hash=review_hash(body))
+        except (ConfigError, GitHubAuthError, RunnerError, Exception) as exc:
+            store.update(job.id, "failed", str(exc))
             print(f"review job {job_id} failed: {exc}", file=sys.stderr)
         finally:
             work_queue.task_done()
 
 
 class HostedServiceHandler(BaseHTTPRequestHandler):
-    server_version = "BuildReleaseMCPHostedService/0.1"
+    server_version = "BuildReleaseMCPHostedService/0.2"
 
     def log_message(self, fmt: str, *args: Any) -> None:
         print(f"{self.address_string()} - {fmt % args}", file=sys.stderr)
@@ -143,16 +132,18 @@ class HostedServiceHandler(BaseHTTPRequestHandler):
         if path == "/health/ready":
             missing = required_env_missing()
             status = HTTPStatus.OK if not missing else HTTPStatus.SERVICE_UNAVAILABLE
-            self.write_json(status, {"status": "ok" if not missing else "not_ready", "missing": missing})
+            self.write_json(
+                status,
+                {"status": "ok" if not missing else "not_ready", "missing": missing},
+            )
             return
         if path.startswith("/jobs/"):
             job_id = path.removeprefix("/jobs/")
-            with jobs_lock:
-                job = jobs.get(job_id)
+            job = store.get(job_id)
             if job is None:
                 self.write_json(HTTPStatus.NOT_FOUND, {"error": "job not found"})
                 return
-            self.write_json(HTTPStatus.OK, asdict(job))
+            self.write_json(HTTPStatus.OK, job.as_dict())
             return
         self.write_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
@@ -170,18 +161,25 @@ class HostedServiceHandler(BaseHTTPRequestHandler):
 
         secret = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
         if not secret:
-            self.write_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "GITHUB_WEBHOOK_SECRET is not configured"})
+            self.write_json(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                {"error": "GITHUB_WEBHOOK_SECRET is not configured"},
+            )
             return
         if not verify_signature(secret, body, self.headers.get("X-Hub-Signature-256")):
             self.write_json(HTTPStatus.UNAUTHORIZED, {"error": "invalid signature"})
             return
 
         event = self.headers.get("X-GitHub-Event")
+        delivery_id = self.headers.get("X-GitHub-Delivery", "")
         if event == "ping":
             self.write_json(HTTPStatus.OK, {"status": "pong"})
             return
         if event != "pull_request":
-            self.write_json(HTTPStatus.ACCEPTED, {"status": "ignored", "reason": "unsupported event"})
+            self.write_json(
+                HTTPStatus.ACCEPTED,
+                {"status": "ignored", "reason": "unsupported event"},
+            )
             return
 
         try:
@@ -190,17 +188,24 @@ class HostedServiceHandler(BaseHTTPRequestHandler):
             self.write_json(HTTPStatus.BAD_REQUEST, {"error": "invalid JSON"})
             return
 
-        response = handle_pull_request_event(payload)
+        response = handle_pull_request_event(payload, delivery_id=delivery_id)
         self.write_json(response[0], response[1])
 
 
-def handle_pull_request_event(payload: dict[str, Any]) -> tuple[HTTPStatus, dict[str, Any]]:
+def handle_pull_request_event(
+    payload: dict[str, Any], delivery_id: str = ""
+) -> tuple[HTTPStatus, dict[str, Any]]:
     action = payload.get("action")
     pull_request = payload.get("pull_request") or {}
     repo = (payload.get("repository") or {}).get("full_name")
+    installation_id = (payload.get("installation") or {}).get("id")
 
     if action not in PR_ACTIONS:
-        return HTTPStatus.ACCEPTED, {"status": "ignored", "reason": "unsupported action", "action": action}
+        return HTTPStatus.ACCEPTED, {
+            "status": "ignored",
+            "reason": "unsupported action",
+            "action": action,
+        }
     if pull_request.get("draft"):
         return HTTPStatus.ACCEPTED, {"status": "ignored", "reason": "draft pull request"}
     if not env_bool("HOSTED_SERVICE_ALLOW_FORKS", False):
@@ -213,28 +218,58 @@ def handle_pull_request_event(payload: dict[str, Any]) -> tuple[HTTPStatus, dict
         return HTTPStatus.FORBIDDEN, {"error": "repository is not allowed", "repo": repo}
 
     pr_url = pull_request.get("html_url")
-    if not repo or not pr_url:
-        return HTTPStatus.BAD_REQUEST, {"error": "missing repository or pull request URL"}
+    pr_number = pull_request.get("number")
+    head_sha = ((pull_request.get("head") or {}).get("sha")) or ""
+    if not repo or not pr_url or not pr_number or not head_sha:
+        return HTTPStatus.BAD_REQUEST, {"error": "missing repository, PR URL, number, or head SHA"}
 
     missing = required_env_missing()
     if missing:
         return HTTPStatus.SERVICE_UNAVAILABLE, {"error": "service is not configured", "missing": missing}
 
-    job = enqueue_review(pr_url=pr_url, repo=repo, action=action)
-    return HTTPStatus.ACCEPTED, {"status": "queued", "job": asdict(job)}
+    job, created = store.enqueue(
+        delivery_id=delivery_id or f"{repo}:{pr_number}:{head_sha}",
+        repo=repo,
+        pr_url=pr_url,
+        pr_number=int(pr_number),
+        head_sha=head_sha,
+        action=str(action),
+        installation_id=int(installation_id) if installation_id else None,
+    )
+    if created:
+        work_queue.put(job.id)
+        return HTTPStatus.ACCEPTED, {"status": "queued", "job": job.as_dict()}
+    return HTTPStatus.ACCEPTED, {"status": "duplicate", "job": job.as_dict()}
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run the hosted build-release MCP webhook service.")
+    parser.add_argument("--host", default=os.environ.get("HOSTED_SERVICE_HOST", "0.0.0.0"))
+    parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", str(DEFAULT_PORT))))
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=int(os.environ.get("HOSTED_SERVICE_WORKERS", "1")),
+    )
+    parser.add_argument(
+        "--db",
+        default=os.environ.get("HOSTED_SERVICE_DB", "/tmp/build-release-mcp/jobs.sqlite3"),
+    )
+    return parser.parse_args()
 
 
 def main() -> int:
-    host = os.environ.get("HOSTED_SERVICE_HOST", "0.0.0.0")
-    port = int(os.environ.get("PORT", str(DEFAULT_PORT)))
-    workers = int(os.environ.get("HOSTED_SERVICE_WORKERS", "1"))
+    global store
+    args = parse_args()
+    store = JobStore(args.db)
 
-    for _ in range(max(1, workers)):
+    for _ in range(max(1, args.workers)):
         thread = threading.Thread(target=worker, daemon=True)
         thread.start()
 
-    server = ThreadingHTTPServer((host, port), HostedServiceHandler)
-    print(f"Hosted build-release MCP service listening on {host}:{port}", file=sys.stderr)
+    Path(args.db).parent.mkdir(parents=True, exist_ok=True)
+    server = ThreadingHTTPServer((args.host, args.port), HostedServiceHandler)
+    print(f"Hosted build-release MCP service listening on {args.host}:{args.port}", file=sys.stderr)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

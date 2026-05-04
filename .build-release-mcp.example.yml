@@ -1,0 +1,8 @@
+model: gpt-5
+
+pr_review:
+  enabled: true
+  max_diff_bytes: 180000
+  ignored_paths:
+    - docs/**
+    - "*.md"
