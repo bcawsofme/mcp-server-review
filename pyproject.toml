@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "pr-review-mcp-server"
+name = "build-release-mcp-server"
 version = "0.1.0"
-description = "A small stdio MCP server for GitHub pull request reviews."
+description = "A stdio MCP server for build, release, and GitHub pull request operations."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
@@ -13,8 +13,10 @@ authors = [{ name = "Your Name" }]
 dependencies = []
 
 [project.scripts]
+build-release-mcp = "build_release_mcp.server:main"
+build-release-mcp-review = "build_release_mcp.review_runner:main"
 pr-review-mcp = "pr_review_mcp.server:main"
 pr-review-mcp-review = "pr_review_mcp.review_runner:main"
 
 [tool.setuptools.packages.find]
-include = ["pr_review_mcp*"]
+include = ["build_release_mcp*", "pr_review_mcp*"]

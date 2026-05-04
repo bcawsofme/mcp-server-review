@@ -1,3 +1,3 @@
-"""PR review MCP server package."""
+"""Compatibility package for the old pr_review_mcp module name."""
 
-__version__ = "0.1.0"
+from build_release_mcp import __version__

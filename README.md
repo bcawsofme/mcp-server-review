@@ -1,22 +1,33 @@
-# PR Review And Release Ops MCP Server
+# Build And Release MCP Server
 
-A small stdio MCP server that exposes focused GitHub pull request review tools.
-It uses the GitHub CLI (`gh`) instead of a GitHub SDK, so it has no third-party
-Python runtime dependencies.
+A small stdio MCP server for build, release, and GitHub pull request
+operations. It uses standard local CLIs such as `gh`, `git`, `kubectl`, and
+`docker`, so it has no third-party Python runtime dependencies.
 
 ## What It Does
 
-The server gives an MCP client PR review tools:
+The server gives an MCP client build and release tools across CI diagnostics,
+release readiness, deployment inspection, GitHub Actions hardening, dependency
+review, Kubernetes status, feature flags, database migrations, observability,
+release notes, CODEOWNERS, docs search, ticket extraction, and PR review.
+
+## Server Boundary
+
+This is intentionally one build and release server, with PR review as one tool
+group. That boundary makes sense while the tools share the same repository,
+GitHub, CI, release, and deployment context.
+
+Split this into multiple MCP servers if a tool group needs different
+permissions, write access, separate hosting, or a different operational owner.
+Good future split points would be Kubernetes operations, observability, or
+project management integrations.
+
+PR review is one tool group:
 
 - `pr_overview`: PR metadata, body, review state, checks, branches, and counts.
 - `pr_files`: changed files with additions and deletions.
 - `pr_diff`: full PR diff, truncated to a configurable byte limit.
 - `pr_review_threads`: review threads, defaulting to unresolved inline comments.
-
-It also includes generated build and release operations tools for CI diagnostics,
-release readiness, deployment inspection, workflow hardening, dependency review,
-Kubernetes status, feature flags, database migrations, observability, release
-notes, CODEOWNERS, docs search, and ticket extraction.
 
 Prompts:
 
@@ -43,14 +54,14 @@ gh auth status
 From this directory:
 
 ```sh
-python3 -m pr_review_mcp
+python3 -m build_release_mcp
 ```
 
 By default, commands run in the current working directory. If your MCP client
-starts servers from another directory, set `PR_REVIEW_MCP_REPO_ROOT`:
+starts servers from another directory, set `BUILD_RELEASE_MCP_REPO_ROOT`:
 
 ```sh
-PR_REVIEW_MCP_REPO_ROOT=/path/to/your/repo python3 -m pr_review_mcp
+BUILD_RELEASE_MCP_REPO_ROOT=/path/to/your/repo python3 -m build_release_mcp
 ```
 
 ## MCP Client Config
@@ -60,12 +71,12 @@ Use an absolute path to this checkout:
 ```json
 {
   "mcpServers": {
-    "pr-review": {
+    "build-release": {
       "command": "python3",
-      "args": ["-m", "pr_review_mcp"],
-      "cwd": "/path/to/pr-review-mcp-server",
+      "args": ["-m", "build_release_mcp"],
+      "cwd": "/path/to/build-release-mcp-server",
       "env": {
-        "PR_REVIEW_MCP_REPO_ROOT": "/path/to/your/repo"
+        "BUILD_RELEASE_MCP_REPO_ROOT": "/path/to/your/repo"
       }
     }
   }
@@ -77,11 +88,11 @@ Some clients do not support `cwd`; in that case point directly at the module:
 ```json
 {
   "mcpServers": {
-    "pr-review": {
+    "build-release": {
       "command": "python3",
-      "args": ["/path/to/pr-review-mcp-server/pr_review_mcp/server.py"],
+      "args": ["/path/to/build-release-mcp-server/build_release_mcp/server.py"],
       "env": {
-        "PR_REVIEW_MCP_REPO_ROOT": "/path/to/your/repo"
+        "BUILD_RELEASE_MCP_REPO_ROOT": "/path/to/your/repo"
       }
     }
   }
@@ -100,7 +111,7 @@ gh auth login -h github.com
 ```
 
 3. Configure your MCP client to run this server and set
-   `PR_REVIEW_MCP_REPO_ROOT` to the cloned repository.
+   `BUILD_RELEASE_MCP_REPO_ROOT` to the cloned repository.
 4. Ask your MCP client something like:
 
 ```text
@@ -179,16 +190,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5' }}
-          PR_REVIEW_MCP_REPO_ROOT: ${{ github.workspace }}
+          BUILD_RELEASE_MCP_REPO_ROOT: ${{ github.workspace }}
         run: |
-          python3 -m pr_review_mcp.review_runner \
+          python3 -m build_release_mcp.review_runner \
             "${{ github.event.pull_request.html_url }}" \
             --post-comment
 ```
 
 This repository includes that workflow at
 `.github/workflows/ai-pr-review.yml` and the runner at
-`pr_review_mcp/review_runner.py`.
+`build_release_mcp/review_runner.py`.
 
 To enable it in a repository:
 
@@ -236,78 +247,25 @@ are read-only and use standard local CLIs or local repository scans:
 - Local file scans for workflows, dependency manifests, lockfiles, migration
   files, feature flags, CODEOWNERS, and docs.
 
-### CI Diagnostics
+Detailed docs:
 
-- `ci_list_failed_runs`
-- `ci_get_run_jobs`
-- `ci_get_job_logs`
-- `ci_compare_last_green_run`
-- `ci_find_flaky_tests`
+- [Tool Groups](docs/tool-groups/README.md)
+- [PR Review](docs/tool-groups/pr-review.md)
+- [CI Diagnostics](docs/tool-groups/ci-diagnostics.md)
+- [Release Readiness](docs/tool-groups/release-readiness.md)
+- [Deployment Status](docs/tool-groups/deployment-status.md)
+- [GitHub Actions Hardening](docs/tool-groups/github-actions.md)
+- [Dependency And Supply Chain](docs/tool-groups/dependencies.md)
+- [Kubernetes Release Support](docs/tool-groups/kubernetes.md)
+- [Feature Flags](docs/tool-groups/feature-flags.md)
+- [Database Migrations](docs/tool-groups/database.md)
+- [Observability](docs/tool-groups/observability.md)
+- [Release Notes And Ownership](docs/tool-groups/release-notes-ownership.md)
 
-### Release Readiness
-
-- `release_prs_since_last_release`
-- `release_check_required_labels`
-- `release_check_ci_status`
-- `release_check_migrations`
-- `release_generate_risk_summary`
-
-### Deployment Status
-
-- `deploy_get_environment_versions`
-- `deploy_get_current_image_tags`
-- `deploy_get_recent_deployments`
-- `deploy_compare_deployed_vs_main`
-
-### GitHub Actions Hardening
-
-- `actions_list_workflows`
-- `actions_get_workflow_permissions`
-- `actions_detect_unpinned_actions`
-
-### Dependency And Supply Chain
-
-- `deps_inspect_lockfile_changes`
-- `deps_check_changed_manifests`
-- `deps_find_unpinned_container_images`
-- `image_inspect`
-- `image_get_digest`
-
-### Kubernetes Release Support
-
-- `k8s_get_deployments`
-- `k8s_get_pods`
-- `k8s_get_events`
-- `k8s_rollout_status`
-
-### Feature Flags
-
-- `flags_scan_repo`
-- `flags_compare_env_files`
-
-### Database Migrations
-
-- `db_list_migration_files`
-- `db_detect_destructive_migrations`
-- `db_changed_migrations`
-
-### Observability
-
-- `obs_query_prometheus`
-- `obs_recent_k8s_warnings`
-
-### Release Notes And Ownership
-
-- `release_notes_collect_merged_prs`
-- `release_notes_group_by_label`
-- `codeowners_for_paths`
-- `docs_search`
-- `project_extract_ticket_refs`
-
-These tools are meant as a starting point. For production use, replace or extend
-the CLI-backed implementations with your team's source of truth for deployment
-state, feature flags, observability, vulnerability scanning, and project
-management.
+These tools are meant as a starting point. For production use, replace or
+extend the CLI-backed implementations with your team's source of truth for
+deployment state, feature flags, observability, vulnerability scanning, and
+project management.
 
 ## Tool Examples
 
@@ -338,8 +296,8 @@ Run locally:
 ```sh
 OPENAI_API_KEY=... \
 OPENAI_MODEL=gpt-5 \
-PR_REVIEW_MCP_REPO_ROOT=/path/to/repo \
-python3 -m pr_review_mcp.review_runner https://github.com/OWNER/REPO/pull/123
+BUILD_RELEASE_MCP_REPO_ROOT=/path/to/repo \
+python3 -m build_release_mcp.review_runner https://github.com/OWNER/REPO/pull/123
 ```
 
 Post the result as a PR comment:
@@ -347,8 +305,8 @@ Post the result as a PR comment:
 ```sh
 OPENAI_API_KEY=... \
 GH_TOKEN=... \
-PR_REVIEW_MCP_REPO_ROOT=/path/to/repo \
-python3 -m pr_review_mcp.review_runner https://github.com/OWNER/REPO/pull/123 --post-comment
+BUILD_RELEASE_MCP_REPO_ROOT=/path/to/repo \
+python3 -m build_release_mcp.review_runner https://github.com/OWNER/REPO/pull/123 --post-comment
 ```
 
 Environment variables:
@@ -356,7 +314,10 @@ Environment variables:
 - `OPENAI_API_KEY`: required.
 - `OPENAI_MODEL`: optional, defaults to `gpt-5`.
 - `OPENAI_BASE_URL`: optional, defaults to `https://api.openai.com/v1`.
-- `PR_REVIEW_MCP_REPO_ROOT`: repository checkout used by `gh`.
+- `BUILD_RELEASE_MCP_REPO_ROOT`: repository checkout used by `gh`, `git`, and
+  local scans.
+- `PR_REVIEW_MCP_REPO_ROOT`: deprecated compatibility alias for
+  `BUILD_RELEASE_MCP_REPO_ROOT`.
 - `AI_REVIEW_MAX_DIFF_BYTES`: optional diff limit, defaults to `180000`.
 - `AI_REVIEW_MAX_OUTPUT_TOKENS`: optional model output limit, defaults to
   `1800`.
@@ -370,7 +331,7 @@ printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
   '{"jsonrpc":"2.0","id":3,"method":"prompts/list","params":{}}' \
-  | python3 -m pr_review_mcp
+  | python3 -m build_release_mcp
 ```
 
 ## Notes
@@ -379,3 +340,5 @@ printf '%s\n' \
 - `repo` is optional when the server is started inside a git checkout with a
   GitHub `origin` remote.
 - Large diffs are truncated by default to keep model context manageable.
+- The old `pr_review_mcp` module name and `pr-review-mcp` console scripts are
+  still available as compatibility aliases.

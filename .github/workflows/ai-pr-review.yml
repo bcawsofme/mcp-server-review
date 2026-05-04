@@ -32,9 +32,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5' }}
-          PR_REVIEW_MCP_REPO_ROOT: ${{ github.workspace }}
+          BUILD_RELEASE_MCP_REPO_ROOT: ${{ github.workspace }}
           AI_REVIEW_MAX_DIFF_BYTES: "180000"
         run: |
-          python3 -m pr_review_mcp.review_runner \
+          python3 -m build_release_mcp.review_runner \
             "${{ github.event.pull_request.html_url }}" \
             --post-comment

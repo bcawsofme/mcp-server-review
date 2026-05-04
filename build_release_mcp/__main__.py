@@ -1,4 +1,4 @@
-from build_release_mcp.server import main
+from .server import main
 
 
 if __name__ == "__main__":
