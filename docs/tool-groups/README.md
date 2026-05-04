@@ -34,8 +34,6 @@ Many tools accept these optional arguments:
 ## Runtime Assumptions
 
 - `BUILD_RELEASE_MCP_REPO_ROOT` points to the repository being inspected.
-- `PR_REVIEW_MCP_REPO_ROOT` is still supported as a deprecated compatibility
-  alias.
 - `gh` is installed and authenticated for GitHub-backed tools.
 - `kubectl` is installed and configured for Kubernetes-backed tools.
 - `docker` is installed for image inspection tools.

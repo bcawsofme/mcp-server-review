@@ -37,9 +37,7 @@ ToolHandler = Callable[[dict[str, Any]], dict[str, Any]]
 
 
 def repo_root() -> Path:
-    configured = os.environ.get("BUILD_RELEASE_MCP_REPO_ROOT") or os.environ.get(
-        "PR_REVIEW_MCP_REPO_ROOT"
-    )
+    configured = os.environ.get("BUILD_RELEASE_MCP_REPO_ROOT")
     if configured:
         return Path(configured).expanduser().resolve()
     return Path.cwd()

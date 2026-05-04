@@ -197,13 +197,20 @@ def post_comment(pr: str, body: str) -> None:
     try:
         subprocess.run(
             ["gh", "pr", "comment", pr, "--body-file", path],
-            cwd=os.environ.get("BUILD_RELEASE_MCP_REPO_ROOT")
-            or os.environ.get("PR_REVIEW_MCP_REPO_ROOT")
-            or os.getcwd(),
+            cwd=os.environ.get("BUILD_RELEASE_MCP_REPO_ROOT") or os.getcwd(),
             check=True,
         )
     finally:
         Path(path).unlink(missing_ok=True)
+
+
+def run_review(pr: str, post: bool = False, max_diff_bytes: int = 180_000) -> str:
+    context = collect_pr_context(pr, max_diff_bytes)
+    review = call_openai(build_review_prompt(context))
+    body = f"{COMMENT_MARKER}\n\n## AI PR Review\n\n{review}\n"
+    if post:
+        post_comment(pr, body)
+    return body
 
 
 def parse_args() -> argparse.Namespace:
@@ -223,17 +230,12 @@ def main() -> int:
     if not args.pr:
         raise RunnerError("Provide a PR number or URL, or set PR_URL")
 
-    context = collect_pr_context(args.pr, args.max_diff_bytes)
-    review = call_openai(build_review_prompt(context))
-    body = f"{COMMENT_MARKER}\n\n## AI PR Review\n\n{review}\n"
+    body = run_review(args.pr, post=args.post_comment, max_diff_bytes=args.max_diff_bytes)
     print(body)
 
     step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if step_summary:
         Path(step_summary).write_text(body, encoding="utf-8")
-
-    if args.post_comment:
-        post_comment(args.pr, body)
 
     return 0
 

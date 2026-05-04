@@ -234,6 +234,9 @@ This is the most operationally mature option:
 Use this when you want organization-wide automation, auditability, and a single
 place to manage upgrades.
 
+This repository includes a hosted webhook service implementation. See
+[Hosted Service](docs/hosted-service.md).
+
 ## Expanding Beyond PR Review
 
 This server now includes a generated build and release tool catalog. The tools
@@ -316,8 +319,6 @@ Environment variables:
 - `OPENAI_BASE_URL`: optional, defaults to `https://api.openai.com/v1`.
 - `BUILD_RELEASE_MCP_REPO_ROOT`: repository checkout used by `gh`, `git`, and
   local scans.
-- `PR_REVIEW_MCP_REPO_ROOT`: deprecated compatibility alias for
-  `BUILD_RELEASE_MCP_REPO_ROOT`.
 - `AI_REVIEW_MAX_DIFF_BYTES`: optional diff limit, defaults to `180000`.
 - `AI_REVIEW_MAX_OUTPUT_TOKENS`: optional model output limit, defaults to
   `1800`.
@@ -340,5 +341,3 @@ printf '%s\n' \
 - `repo` is optional when the server is started inside a git checkout with a
   GitHub `origin` remote.
 - Large diffs are truncated by default to keep model context manageable.
-- The old `pr_review_mcp` module name and `pr-review-mcp` console scripts are
-  still available as compatibility aliases.

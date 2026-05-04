@@ -15,8 +15,7 @@ dependencies = []
 [project.scripts]
 build-release-mcp = "build_release_mcp.server:main"
 build-release-mcp-review = "build_release_mcp.review_runner:main"
-pr-review-mcp = "pr_review_mcp.server:main"
-pr-review-mcp-review = "pr_review_mcp.review_runner:main"
+build-release-mcp-service = "build_release_mcp.hosted_service:main"
 
 [tool.setuptools.packages.find]
-include = ["build_release_mcp*", "pr_review_mcp*"]
+include = ["build_release_mcp*"]

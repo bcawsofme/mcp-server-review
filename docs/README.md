@@ -6,6 +6,7 @@ This directory breaks the MCP server down by operating area. Start with
 ## Guides
 
 - [Tool Groups](tool-groups/README.md)
+- [Hosted Service](hosted-service.md)
 - [PR Review](tool-groups/pr-review.md)
 - [CI Diagnostics](tool-groups/ci-diagnostics.md)
 - [Release Readiness](tool-groups/release-readiness.md)
