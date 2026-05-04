@@ -12,6 +12,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+try:
+    from .ops_tools import OPS_TOOLS, OpsToolError
+except ImportError:
+    from ops_tools import OPS_TOOLS, OpsToolError
+
 
 SERVER_NAME = "pr-review"
 SERVER_VERSION = "0.1.0"
@@ -353,6 +358,7 @@ TOOLS: dict[str, dict[str, Any]] = {
         },
     },
 }
+TOOLS.update(OPS_TOOLS)
 
 
 def tool_list() -> dict[str, Any]:
@@ -378,6 +384,14 @@ def prompt_list() -> dict[str, Any]:
                     {"name": "pr", "description": "Pull request number or URL.", "required": True},
                     {"name": "repo", "description": "Optional GitHub repo as owner/name.", "required": False},
                 ],
+            },
+            {
+                "name": "release_readiness",
+                "description": "Build and release readiness workflow.",
+                "arguments": [
+                    {"name": "base", "description": "Base ref for comparison.", "required": False},
+                    {"name": "repo", "description": "Optional GitHub repo as owner/name.", "required": False},
+                ],
             }
         ]
     }
@@ -385,14 +399,12 @@ def prompt_list() -> dict[str, Any]:
 
 def prompt_get(params: dict[str, Any]) -> dict[str, Any]:
     name = params.get("name")
-    if name != "review_pr":
-        raise ToolError(f"Unknown prompt: {name}")
-
     arguments = params.get("arguments") or {}
-    pr = arguments.get("pr", "<PR number or URL>")
-    repo = arguments.get("repo")
-    repo_text = f" in {repo}" if repo else ""
-    text = f"""
+    if name == "review_pr":
+        pr = arguments.get("pr", "<PR number or URL>")
+        repo = arguments.get("repo")
+        repo_text = f" in {repo}" if repo else ""
+        text = f"""
 Review pull request {pr}{repo_text}.
 
 Use the PR review MCP tools in this order:
@@ -407,7 +419,32 @@ Review stance:
 - Cite exact files and lines when possible.
 - If no blocking issues are found, say that and mention residual risk or unverified tests.
 """.strip()
-    return {"messages": [{"role": "user", "content": {"type": "text", "text": text}}]}
+        return {"messages": [{"role": "user", "content": {"type": "text", "text": text}}]}
+
+    if name == "release_readiness":
+        base = arguments.get("base", "origin/main")
+        repo = arguments.get("repo")
+        repo_text = f" against {repo}" if repo else ""
+        text = f"""
+Run a release readiness review{repo_text} using base ref {base}.
+
+Use the build and release MCP tools in this order:
+1. release_generate_risk_summary with base={base}.
+2. release_check_migrations with base={base}.
+3. deps_inspect_lockfile_changes and deps_check_changed_manifests with base={base}.
+4. actions_detect_unpinned_actions and actions_get_workflow_permissions.
+5. flags_scan_repo.
+6. db_detect_destructive_migrations.
+7. release_check_ci_status for HEAD if GitHub access is configured.
+
+Review stance:
+- Prioritize release blockers, rollback risk, migration risk, supply-chain risk, CI gaps, and missing verification.
+- Separate hard blockers from follow-up recommendations.
+- Mention which tools were unavailable or unconfigured.
+""".strip()
+        return {"messages": [{"role": "user", "content": {"type": "text", "text": text}}]}
+
+    raise ToolError(f"Unknown prompt: {name}")
 
 
 def handle_request(message: dict[str, Any]) -> dict[str, Any] | None:
@@ -447,7 +484,7 @@ def handle_request(message: dict[str, Any]) -> dict[str, Any] | None:
                 "error": {"code": -32601, "message": f"Method not found: {method}"},
             }
         return {"jsonrpc": "2.0", "id": request_id, "result": result}
-    except ToolError as exc:
+    except (ToolError, OpsToolError) as exc:
         return {
             "jsonrpc": "2.0",
             "id": request_id,
