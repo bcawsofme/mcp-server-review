@@ -170,10 +170,24 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5' }}
+          PR_REVIEW_MCP_REPO_ROOT: ${{ github.workspace }}
         run: |
-          python3 scripts/ai_pr_review.py "$PR_URL"
+          python3 -m pr_review_mcp.review_runner \
+            "${{ github.event.pull_request.html_url }}" \
+            --post-comment
 ```
+
+This repository includes that workflow at
+`.github/workflows/ai-pr-review.yml` and the runner at
+`pr_review_mcp/review_runner.py`.
+
+To enable it in a repository:
+
+1. Add an `OPENAI_API_KEY` repository secret.
+2. Optionally add an `OPENAI_MODEL` repository variable. It defaults to
+   `gpt-5`.
+3. Make sure GitHub Actions is enabled for the repository.
 
 Use this when you want consistent automated review coverage on every PR. Keep
 the bot's feedback scoped to correctness, security, tests, and regressions so
@@ -182,7 +196,8 @@ it does not create noisy style comments.
 Security note: be careful with forked PRs. Do not run untrusted PR code with
 secrets. Prefer reading diffs and metadata only, or design a sandbox
 deliberately. Avoid `pull_request_target` unless you understand the security
-tradeoffs.
+tradeoffs. The included workflow runs only for non-draft PRs from the same
+repository, so it does not expose model API secrets to forked PRs.
 
 ### Hosted Service
 
@@ -255,6 +270,39 @@ or:
   "pr": 123
 }
 ```
+
+## Review Runner
+
+The review runner calls the MCP server, sends the collected PR context to the
+OpenAI Responses API, and prints a Markdown review.
+
+Run locally:
+
+```sh
+OPENAI_API_KEY=... \
+OPENAI_MODEL=gpt-5 \
+PR_REVIEW_MCP_REPO_ROOT=/path/to/repo \
+python3 -m pr_review_mcp.review_runner https://github.com/OWNER/REPO/pull/123
+```
+
+Post the result as a PR comment:
+
+```sh
+OPENAI_API_KEY=... \
+GH_TOKEN=... \
+PR_REVIEW_MCP_REPO_ROOT=/path/to/repo \
+python3 -m pr_review_mcp.review_runner https://github.com/OWNER/REPO/pull/123 --post-comment
+```
+
+Environment variables:
+
+- `OPENAI_API_KEY`: required.
+- `OPENAI_MODEL`: optional, defaults to `gpt-5`.
+- `OPENAI_BASE_URL`: optional, defaults to `https://api.openai.com/v1`.
+- `PR_REVIEW_MCP_REPO_ROOT`: repository checkout used by `gh`.
+- `AI_REVIEW_MAX_DIFF_BYTES`: optional diff limit, defaults to `180000`.
+- `AI_REVIEW_MAX_OUTPUT_TOKENS`: optional model output limit, defaults to
+  `1800`.
 
 ## Smoke Test
 

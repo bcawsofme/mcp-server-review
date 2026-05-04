@@ -14,6 +14,7 @@ dependencies = []
 
 [project.scripts]
 pr-review-mcp = "pr_review_mcp.server:main"
+pr-review-mcp-review = "pr_review_mcp.review_runner:main"
 
 [tool.setuptools.packages.find]
 include = ["pr_review_mcp*"]
