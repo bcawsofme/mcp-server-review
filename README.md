@@ -269,6 +269,65 @@ The hosted service now includes GitHub App token support, SQLite-backed job
 state, webhook idempotency, repository-level config, and update-in-place PR
 comments.
 
+## PR Review Agent Roadmap
+
+This repository is the start of a PR Review Agent, but it is not yet the full
+stateful review loop. The current implementation can collect PR context, run an
+AI review, post/update a review comment, and run a manual minor-fix workflow.
+
+The target flow is:
+
+```text
+PR opened or updated
+  -> GitHub App webhook receiver
+  -> worker queue
+  -> PR Review Agent
+  -> MCP tools collect PR context
+  -> review engine creates findings
+  -> state DB tracks finding lifecycle
+  -> optional fix agent creates a branch or commit
+  -> GitHub API posts review output
+  -> new PR commits trigger reconciliation
+```
+
+The hosted service should own orchestration, permissions, queueing, state, and
+GitHub App lifecycle. MCP should be the agent tool boundary: narrow tools expose
+repository, PR, CI, ownership, and write operations to the agent without making
+the model responsible for service control flow or persistence.
+
+Core agent pieces to add:
+
+1. Context Collector
+   - PR diff, changed files, check runs, CODEOWNERS, previous comments, test
+     results, relevant file contents, and repository config.
+2. Review Engine
+   - Structured findings for real issues only: bugs, missing tests, security
+     concerns, deployment or release risk, broken CI, and ownership gaps.
+3. State Store
+   - PR number, reviewed commit SHA, finding ID, file/line, issue summary,
+     status (`open`, `resolved`, `ignored`), and fix commit when available.
+4. Fix Agent
+   - Safe, opt-in fixes such as small bug fixes, test updates, config fixes,
+     docs updates, or changelog updates.
+5. Feedback Loop
+   - On every new commit, compare against previous findings, mark resolved
+     items, keep unresolved items, honor ignored items, and comment only on new
+     or materially changed findings.
+
+Recommended implementation order:
+
+1. Add a `findings` table to `JobStore`.
+2. Define a `Finding` schema with stable fingerprinting.
+3. Make review output structured JSON internally, with Markdown generated only
+   at the posting layer.
+4. Add first-class context tools for checks, CODEOWNERS, test results, and file
+   reads.
+5. Add finding reconciliation on new commits: `open`, `resolved`, `ignored`,
+   and `new`.
+6. Move minor fixes into the hosted service as an opt-in GitHub App action.
+7. Add MCP write tools after state tracking exists, such as `create_branch`,
+   `commit_file_change`, `post_review_comment`, and `mark_finding_resolved`.
+
 ## Expanding Beyond PR Review
 
 This server now includes a generated build and release tool catalog. The tools
