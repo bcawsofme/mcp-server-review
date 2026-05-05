@@ -9,7 +9,9 @@ from build_release_mcp.fix_runner import (
 from build_release_mcp.review_runner import (
     RunnerError,
     apply_review_config,
+    parse_structured_review,
     parse_pr_url,
+    render_findings_markdown,
     review_hash,
 )
 
@@ -111,6 +113,27 @@ diff --git a/app.py b/app.py
 
         with self.assertRaises(RunnerError):
             validate_patch_paths(diff)
+
+    def test_parse_structured_review(self) -> None:
+        findings, residual_risk = parse_structured_review(
+            """{"findings":[{"severity":"high","path":"app.py","line":2,"summary":"Bug","details":"Breaks prod","suggested_fix":"Guard it."}],"residual_risk":"tests not run"}"""
+        )
+
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].severity, "high")
+        self.assertEqual(findings[0].summary, "Bug")
+        self.assertEqual(residual_risk, "tests not run")
+
+    def test_render_findings_markdown(self) -> None:
+        findings, _ = parse_structured_review(
+            """{"findings":[{"severity":"low","path":"app.py","line":2,"summary":"Bug","details":"Breaks prod","suggested_fix":"Guard it."}]}"""
+        )
+
+        rendered = render_findings_markdown(findings)
+
+        self.assertIn("LOW", rendered)
+        self.assertIn("app.py:2", rendered)
+        self.assertIn("Suggested fix: Guard it.", rendered)
 
 
 if __name__ == "__main__":

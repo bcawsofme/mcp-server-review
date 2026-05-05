@@ -8,13 +8,19 @@ import os
 import re
 import subprocess
 import sys
+import fnmatch
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
 try:
+    from .findings import FINDING_STATUSES, RESOLVED
+    from .job_store import JobStore
     from .ops_tools import OPS_TOOLS, OpsToolError
 except ImportError:
+    from findings import FINDING_STATUSES, RESOLVED
+    from job_store import JobStore
     from ops_tools import OPS_TOOLS, OpsToolError
 
 
@@ -92,6 +98,16 @@ def normalize_repo(repo: Any) -> str | None:
     return value
 
 
+def normalize_string(value: Any, name: str, default: str | None = None) -> str:
+    if value is None:
+        if default is None:
+            raise ToolError(f"{name} is required")
+        return default
+    if not isinstance(value, str) or not value.strip():
+        raise ToolError(f"{name} must be a non-empty string")
+    return value.strip()
+
+
 def parse_pr_url(value: str) -> PullRequestRef | None:
     match = re.fullmatch(
         r"https://github\.com/([\w.-]+)/([\w.-]+)/pull/([0-9]+)(?:[/?#].*)?",
@@ -162,6 +178,74 @@ def text_response(text: str) -> dict[str, Any]:
 
 def json_response(value: Any) -> dict[str, Any]:
     return text_response(json.dumps(value, indent=2, sort_keys=True))
+
+
+def safe_repo_path(raw_path: Any) -> Path:
+    path = safe_repo_target(raw_path)
+    if not path.is_file():
+        raise ToolError(f"file not found: {raw_path}")
+    return path
+
+
+def safe_repo_target(raw_path: Any) -> Path:
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        raise ToolError("path must be a non-empty string")
+    relative = Path(raw_path)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ToolError("path must stay inside the repository")
+    root = repo_root().resolve()
+    path = (root / relative).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError as exc:
+        raise ToolError("path must stay inside the repository") from exc
+    return path
+
+
+def read_repo_file(path: Path, limit_bytes: int) -> dict[str, Any]:
+    limit = min(max(limit_bytes, 1), MAX_DIFF_LIMIT_BYTES)
+    text = path.read_text(encoding="utf-8", errors="replace")
+    payload = truncate_text(text, limit)
+    payload["path"] = str(path.relative_to(repo_root()))
+    payload["limitBytes"] = limit
+    return payload
+
+
+def codeowners_candidates() -> list[Path]:
+    root = repo_root()
+    return [
+        root / ".github" / "CODEOWNERS",
+        root / "CODEOWNERS",
+        root / "docs" / "CODEOWNERS",
+    ]
+
+
+def read_codeowners_rules() -> tuple[str | None, list[dict[str, Any]]]:
+    codeowners = next((path for path in codeowners_candidates() if path.exists()), None)
+    if codeowners is None:
+        return None, []
+    rules = []
+    for line_number, line in enumerate(codeowners.read_text(encoding="utf-8", errors="replace").splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        parts = stripped.split()
+        if len(parts) < 2:
+            continue
+        rules.append({"line": line_number, "pattern": parts[0], "owners": parts[1:]})
+    return str(codeowners.relative_to(repo_root())), rules
+
+
+def codeowners_pattern_matches(pattern: str, path: str) -> bool:
+    normalized = pattern.strip()
+    if not normalized:
+        return False
+    normalized = normalized.rstrip("/")
+    if normalized.startswith("/"):
+        return fnmatch.fnmatch(path, normalized.lstrip("/"))
+    if "/" not in normalized:
+        return fnmatch.fnmatch(Path(path).name, normalized) or fnmatch.fnmatch(path, f"**/{normalized}")
+    return fnmatch.fnmatch(path, normalized) or fnmatch.fnmatch(path, f"**/{normalized}")
 
 
 def tool_pr_overview(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -295,6 +379,174 @@ query($owner: String!, $name: String!, $number: Int!) {
     return json_response(threads)
 
 
+def tool_pr_check_runs(arguments: dict[str, Any]) -> dict[str, Any]:
+    pr_ref = normalize_pr_ref(arguments.get("pr"), arguments.get("repo"))
+    result = run_command(
+        [
+            "gh",
+            "pr",
+            "view",
+            pr_ref.pr,
+            *repo_args(pr_ref.repo),
+            "--json",
+            "headRefName,headRefOid,statusCheckRollup",
+        ],
+        timeout=45,
+    )
+    return json_response(parse_json(result.stdout))
+
+
+def pr_head_sha(pr_ref: PullRequestRef) -> str:
+    result = run_command(
+        [
+            "gh",
+            "pr",
+            "view",
+            pr_ref.pr,
+            *repo_args(pr_ref.repo),
+            "--json",
+            "headRefOid",
+        ],
+        timeout=45,
+    )
+    sha = parse_json(result.stdout).get("headRefOid")
+    if not sha:
+        raise ToolError("Could not determine PR head SHA")
+    return str(sha)
+
+
+def tool_pr_test_results(arguments: dict[str, Any]) -> dict[str, Any]:
+    pr_ref = normalize_pr_ref(arguments.get("pr"), arguments.get("repo"))
+    owner, name = pr_ref.repo.split("/", 1) if pr_ref.repo else current_repo()
+    sha = pr_head_sha(pr_ref)
+    result = run_command(
+        [
+            "gh",
+            "api",
+            *repo_args(f"{owner}/{name}"),
+            f"repos/{{owner}}/{{repo}}/commits/{sha}/check-runs",
+        ],
+        timeout=45,
+    )
+    data = parse_json(result.stdout)
+    check_runs = []
+    for item in data.get("check_runs", []):
+        output = item.get("output") or {}
+        check_runs.append(
+            {
+                "name": item.get("name"),
+                "status": item.get("status"),
+                "conclusion": item.get("conclusion"),
+                "html_url": item.get("html_url"),
+                "details_url": item.get("details_url"),
+                "summary": output.get("summary"),
+                "text": truncate_text(output.get("text") or "", 20_000),
+            }
+        )
+    return json_response({"headSha": sha, "checkRuns": check_runs})
+
+
+def tool_pr_codeowners(arguments: dict[str, Any]) -> dict[str, Any]:
+    paths = arguments.get("paths")
+    if paths is None and arguments.get("pr") is not None:
+        files = parse_json(
+            run_command(
+                [
+                    "gh",
+                    "pr",
+                    "view",
+                    normalize_pr_ref(arguments.get("pr"), arguments.get("repo")).pr,
+                    *repo_args(normalize_pr_ref(arguments.get("pr"), arguments.get("repo")).repo),
+                    "--json",
+                    "files",
+                ],
+                timeout=45,
+            ).stdout
+        ).get("files", [])
+        paths = [item.get("path") for item in files if isinstance(item, dict) and item.get("path")]
+    if not isinstance(paths, list) or not all(isinstance(path, str) for path in paths):
+        raise ToolError("paths must be an array of strings, or provide pr")
+
+    codeowners_file, rules = read_codeowners_rules()
+    matches = []
+    for path in paths:
+        matching_rules = [
+            rule
+            for rule in rules
+            if codeowners_pattern_matches(str(rule["pattern"]), path)
+        ]
+        matches.append({"path": path, "matchingRules": matching_rules})
+    return json_response({"codeownersFile": codeowners_file, "matches": matches})
+
+
+def tool_pr_file(arguments: dict[str, Any]) -> dict[str, Any]:
+    limit = arguments.get("max_bytes", DEFAULT_DIFF_LIMIT_BYTES)
+    if not isinstance(limit, int) or limit < 1:
+        raise ToolError("max_bytes must be a positive integer")
+    return json_response(read_repo_file(safe_repo_path(arguments.get("path")), limit))
+
+
+def tool_create_branch(arguments: dict[str, Any]) -> dict[str, Any]:
+    branch = normalize_string(arguments.get("branch"), "branch")
+    from_ref = normalize_string(arguments.get("from_ref"), "from_ref", "HEAD")
+    if not re.fullmatch(r"[\w./-]+", branch):
+        raise ToolError("branch contains unsupported characters")
+    run_command(["git", "branch", branch, from_ref])
+    sha = run_command(["git", "rev-parse", branch]).stdout.strip()
+    return json_response({"branch": branch, "fromRef": from_ref, "sha": sha})
+
+
+def tool_commit_file_change(arguments: dict[str, Any]) -> dict[str, Any]:
+    path = safe_repo_target(arguments.get("path"))
+    content = arguments.get("content")
+    if not isinstance(content, str):
+        raise ToolError("content must be a string")
+    message = normalize_string(arguments.get("message"), "message")
+    branch = None
+    if arguments.get("branch") is not None:
+        branch = normalize_string(arguments.get("branch"), "branch")
+        run_command(["git", "switch", branch])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    relative = str(path.relative_to(repo_root()))
+    run_command(["git", "add", relative])
+    run_command(["git", "commit", "-m", message], timeout=120)
+    sha = run_command(["git", "rev-parse", "HEAD"]).stdout.strip()
+    return json_response({"branch": branch, "path": relative, "commit": sha})
+
+
+def tool_post_review_comment(arguments: dict[str, Any]) -> dict[str, Any]:
+    pr_ref = normalize_pr_ref(arguments.get("pr"), arguments.get("repo"))
+    body = normalize_string(arguments.get("body"), "body")
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as file:
+        file.write(body)
+        path = file.name
+    try:
+        run_command(["gh", "pr", "comment", pr_ref.pr, *repo_args(pr_ref.repo), "--body-file", path])
+    finally:
+        Path(path).unlink(missing_ok=True)
+    return json_response({"pr": pr_ref.pr, "commented": True})
+
+
+def tool_mark_finding_resolved(arguments: dict[str, Any]) -> dict[str, Any]:
+    repo = normalize_repo(arguments.get("repo"))
+    if repo is None:
+        owner, name = current_repo()
+        repo = f"{owner}/{name}"
+    pr_number = arguments.get("pr_number")
+    if not isinstance(pr_number, int) or pr_number <= 0:
+        raise ToolError("pr_number must be a positive integer")
+    finding_id = normalize_string(arguments.get("finding_id"), "finding_id")
+    status = normalize_string(arguments.get("status"), "status", RESOLVED).lower()
+    if status not in FINDING_STATUSES:
+        raise ToolError("status must be open, resolved, or ignored")
+    db_path = os.environ.get("HOSTED_SERVICE_DB", "/tmp/build-release-mcp/jobs.sqlite3")
+    JobStore(db_path).set_finding_status(repo, pr_number, finding_id, status)
+    return json_response(
+        {"repo": repo, "pr_number": pr_number, "finding_id": finding_id, "status": status}
+    )
+
+
 ToolHandler = Callable[[dict[str, Any]], dict[str, Any]]
 
 TOOLS: dict[str, dict[str, Any]] = {
@@ -357,6 +609,120 @@ TOOLS: dict[str, dict[str, Any]] = {
             "additionalProperties": False,
         },
     },
+    "pr_check_runs": {
+        "description": "Fetch PR head ref and GitHub check run rollup context.",
+        "handler": tool_pr_check_runs,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "pr": {"type": ["integer", "string"], "description": "Pull request number or URL."},
+                "repo": {"type": "string", "description": "Optional GitHub repo as owner/name."},
+            },
+            "required": ["pr"],
+            "additionalProperties": False,
+        },
+    },
+    "pr_test_results": {
+        "description": "Fetch PR check-run output summaries for test and CI context.",
+        "handler": tool_pr_test_results,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "pr": {"type": ["integer", "string"], "description": "Pull request number or URL."},
+                "repo": {"type": "string", "description": "Optional GitHub repo as owner/name."},
+            },
+            "required": ["pr"],
+            "additionalProperties": False,
+        },
+    },
+    "pr_codeowners": {
+        "description": "Match changed or provided paths against CODEOWNERS rules.",
+        "handler": tool_pr_codeowners,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "pr": {"type": ["integer", "string"], "description": "Optional pull request number or URL."},
+                "repo": {"type": "string", "description": "Optional GitHub repo as owner/name."},
+                "paths": {"type": "array", "items": {"type": "string"}},
+            },
+            "additionalProperties": False,
+        },
+    },
+    "pr_file": {
+        "description": "Read a repository file safely, truncated to a byte limit.",
+        "handler": tool_pr_file,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "max_bytes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": MAX_DIFF_LIMIT_BYTES,
+                    "default": DEFAULT_DIFF_LIMIT_BYTES,
+                },
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+    },
+    "create_branch": {
+        "description": "Create a local git branch from a ref.",
+        "handler": tool_create_branch,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "branch": {"type": "string"},
+                "from_ref": {"type": "string", "default": "HEAD"},
+            },
+            "required": ["branch"],
+            "additionalProperties": False,
+        },
+    },
+    "commit_file_change": {
+        "description": "Write one repository file and commit the change on the current or requested branch.",
+        "handler": tool_commit_file_change,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "branch": {"type": "string"},
+                "path": {"type": "string"},
+                "content": {"type": "string"},
+                "message": {"type": "string"},
+            },
+            "required": ["path", "content", "message"],
+            "additionalProperties": False,
+        },
+    },
+    "post_review_comment": {
+        "description": "Post a pull request comment through GitHub CLI.",
+        "handler": tool_post_review_comment,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "pr": {"type": ["integer", "string"], "description": "Pull request number or URL."},
+                "repo": {"type": "string", "description": "Optional GitHub repo as owner/name."},
+                "body": {"type": "string"},
+            },
+            "required": ["pr", "body"],
+            "additionalProperties": False,
+        },
+    },
+    "mark_finding_resolved": {
+        "description": "Update a stored finding status to resolved, ignored, or open.",
+        "handler": tool_mark_finding_resolved,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "repo": {"type": "string", "description": "Optional GitHub repo as owner/name."},
+                "pr_number": {"type": "integer"},
+                "finding_id": {"type": "string"},
+                "status": {"type": "string", "enum": ["open", "resolved", "ignored"], "default": "resolved"},
+            },
+            "required": ["pr_number", "finding_id"],
+            "additionalProperties": False,
+        },
+    },
 }
 TOOLS.update(OPS_TOOLS)
 
@@ -410,8 +776,10 @@ Review pull request {pr}{repo_text}.
 Use the PR review MCP tools in this order:
 1. pr_overview for scope, checks, review state, and PR intent.
 2. pr_files to identify risky areas and decide which diffs need close reading.
-3. pr_review_threads to avoid duplicating unresolved feedback.
-4. pr_diff with a focused max_bytes value. Request smaller repo context if the full diff is too large.
+3. pr_check_runs and pr_test_results for CI and test context.
+4. pr_codeowners for ownership context on changed paths.
+5. pr_review_threads to avoid duplicating unresolved feedback.
+6. pr_diff with a focused max_bytes value. Request smaller repo context with pr_file if the full diff is too large.
 
 Review stance:
 - Prioritize correctness bugs, regressions, security issues, data loss, race conditions, missing migrations, and missing tests.

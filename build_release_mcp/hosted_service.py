@@ -16,10 +16,19 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from .config import ConfigError, load_repo_config, review_max_diff_bytes
+from .config import ConfigError, get_path, load_repo_config, review_max_diff_bytes
+from .findings import Finding
+from .fix_runner import run_minor_fix
 from .github_auth import GitHubAuthError, has_github_app_config, resolve_token
-from .job_store import JobStore
-from .review_runner import RunnerError, review_hash, run_review
+from .job_store import FindingReconciliation, JobStore, StoredFinding
+from .review_runner import (
+    COMMENT_MARKER,
+    RunnerError,
+    post_comment,
+    render_findings_markdown,
+    review_hash,
+    run_structured_review,
+)
 
 
 MAX_BODY_BYTES = 5 * 1024 * 1024
@@ -45,6 +54,12 @@ def allowed_repos() -> set[str]:
 
 def max_diff_bytes() -> int:
     return int(os.environ.get("AI_REVIEW_MAX_DIFF_BYTES", "180000"))
+
+
+def minor_fixes_enabled(config: dict[str, Any]) -> bool:
+    return env_bool("HOSTED_SERVICE_ENABLE_MINOR_FIXES", False) and bool(
+        get_path(config, ("pr_review", "minor_fixes_enabled"), False)
+    )
 
 
 def has_github_auth_config() -> bool:
@@ -77,6 +92,64 @@ def _job_env(token: str) -> dict[str, str]:
     return env
 
 
+def _stored_to_finding(item: StoredFinding) -> Finding:
+    return Finding(
+        finding_id=item.finding_id,
+        severity=item.severity,
+        path=item.path,
+        line=item.line,
+        summary=item.summary,
+        details=item.details,
+        suggested_fix=item.suggested_fix,
+        status=item.status,
+    )
+
+
+def build_reconciled_review_body(
+    reconciliation: FindingReconciliation,
+    residual_risk: str,
+    head_sha: str,
+) -> str:
+    lines = [COMMENT_MARKER, "", "## AI PR Review", ""]
+    if reconciliation.new_findings:
+        lines.append("New findings on this commit:")
+        lines.append("")
+        lines.append(
+            render_findings_markdown(
+                [_stored_to_finding(item) for item in reconciliation.new_findings],
+                residual_risk="",
+            )
+        )
+    else:
+        lines.append("No new findings on this commit.")
+
+    if reconciliation.resolved_findings:
+        lines.extend(["", "Resolved findings:"])
+        for item in reconciliation.resolved_findings:
+            location = item.path or "unknown file"
+            if item.line:
+                location = f"{location}:{item.line}"
+            lines.append(f"- `{location}` - {item.summary}")
+
+    remaining = [
+        item
+        for item in reconciliation.open_findings
+        if item.finding_id not in {finding.finding_id for finding in reconciliation.new_findings}
+    ]
+    if remaining:
+        lines.extend(["", f"Still open: {len(remaining)} finding(s)."])
+
+    if reconciliation.ignored_findings:
+        lines.extend(["", f"Ignored: {len(reconciliation.ignored_findings)} finding(s)."])
+
+    risk = residual_risk.strip()
+    if risk:
+        lines.extend(["", f"Residual risk: {risk}"])
+
+    lines.extend(["", f"Reviewed commit: `{head_sha}`", ""])
+    return "\n".join(lines)
+
+
 def worker() -> None:
     while True:
         job_id = work_queue.get()
@@ -89,13 +162,39 @@ def worker() -> None:
             token = resolve_token(job.installation_id)
             env = _job_env(token)
             config = load_repo_config(job.repo, job.head_sha, env=env)
-            body = run_review(
+            result = run_structured_review(
                 job.pr_url,
-                post=True,
+                post=False,
                 max_diff_bytes=review_max_diff_bytes(config, max_diff_bytes()),
                 extra_env=env,
                 config=config,
             )
+            reconciliation = store.reconcile_findings(
+                repo=job.repo,
+                pr_number=job.pr_number,
+                head_sha=job.head_sha,
+                findings=result.findings,
+            )
+            body = build_reconciled_review_body(
+                reconciliation,
+                residual_risk=result.residual_risk,
+                head_sha=job.head_sha,
+            )
+            post_comment(job.pr_url, body, extra_env=env)
+            if minor_fixes_enabled(config) and reconciliation.new_findings:
+                try:
+                    run_minor_fix(
+                        job.pr_url,
+                        instructions=(
+                            "Apply only minor, safe fixes for the new structured PR review findings."
+                        ),
+                        post=True,
+                        push=True,
+                        extra_env=env,
+                        config=config,
+                    )
+                except RunnerError as exc:
+                    print(f"minor fix job {job_id} skipped or failed: {exc}", file=sys.stderr)
             store.update(job.id, "completed", review_hash=review_hash(body))
         except (ConfigError, GitHubAuthError, RunnerError, Exception) as exc:
             store.update(job.id, "failed", str(exc))

@@ -96,6 +96,8 @@ Returns SQLite-backed job status for a queued review.
 - `HOSTED_SERVICE_ALLOW_FORKS`: optional, defaults to `false`.
 - `HOSTED_SERVICE_HOST`: optional, defaults to `0.0.0.0`.
 - `HOSTED_SERVICE_WORKERS`: optional, defaults to `1`.
+- `HOSTED_SERVICE_ENABLE_MINOR_FIXES`: optional, defaults to `false`. Enables
+  the hosted worker's minor-fix path only when repository config also opts in.
 - `HOSTED_SERVICE_DB`: optional SQLite DB path, defaults to
   `/tmp/build-release-mcp/jobs.sqlite3`.
 - `PORT`: optional, defaults to `8080`.
@@ -133,6 +135,7 @@ model: gpt-5
 
 pr_review:
   enabled: true
+  minor_fixes_enabled: false
   max_diff_bytes: 180000
   ignored_paths:
     - docs/**
@@ -143,6 +146,8 @@ Supported keys:
 
 - `model`: default model for review.
 - `pr_review.enabled`: disable automated PR review when `false`.
+- `pr_review.minor_fixes_enabled`: allow the hosted service to run the minor-fix
+  agent when `HOSTED_SERVICE_ENABLE_MINOR_FIXES=true`.
 - `pr_review.max_diff_bytes`: max diff bytes collected for the model.
 - `pr_review.ignored_paths`: path globs to omit from the changed-file summary.
 
@@ -160,9 +165,34 @@ events arrive for the same PR commit.
 
 ## Comment Updates
 
-Review comments include a hidden marker. When the runner posts a new result, it
-first looks for an existing marker comment and updates it in place. If no marker
-comment exists, it creates a new PR comment.
+Review comments include a hidden marker. When the service posts a new result,
+it first looks for an existing marker comment and updates it in place. If no
+marker comment exists, it creates a new PR comment.
+
+The hosted worker now stores structured findings in SQLite. Each run reconciles
+the current model findings against previous findings for the PR:
+
+- New findings are marked `open`.
+- Findings still present on a later commit stay `open`.
+- Missing findings are marked `resolved`.
+- Findings manually marked `ignored` stay ignored.
+
+The PR comment emphasizes new findings for the reviewed commit, notes resolved
+findings, and reports remaining open or ignored counts.
+
+## Minor Fixes
+
+The hosted minor-fix path is disabled by default. It runs only when both are
+true:
+
+- `HOSTED_SERVICE_ENABLE_MINOR_FIXES=true`
+- `.build-release-mcp.yml` sets `pr_review.minor_fixes_enabled: true`
+
+When enabled and a review produces new findings, the worker invokes the same
+minor-fix runner used by the manual workflow. The runner still validates the
+model response with `git apply --check`, refuses dirty worktrees, blocks
+workflow-file edits, commits successful changes, pushes the checked-out PR
+branch, and posts a separate minor-fix status comment.
 
 ## Deployment Notes
 

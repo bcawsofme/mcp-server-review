@@ -272,8 +272,10 @@ comments.
 ## PR Review Agent Roadmap
 
 This repository is the start of a PR Review Agent, but it is not yet the full
-stateful review loop. The current implementation can collect PR context, run an
-AI review, post/update a review comment, and run a manual minor-fix workflow.
+automated fix loop. The current implementation can collect PR context, run an
+AI review, normalize findings, persist finding state, reconcile findings across
+new PR commits, post/update a review comment, and run a manual minor-fix
+workflow.
 
 The target flow is:
 
@@ -295,7 +297,7 @@ GitHub App lifecycle. MCP should be the agent tool boundary: narrow tools expose
 repository, PR, CI, ownership, and write operations to the agent without making
 the model responsible for service control flow or persistence.
 
-Core agent pieces to add:
+Core agent pieces:
 
 1. Context Collector
    - PR diff, changed files, check runs, CODEOWNERS, previous comments, test
@@ -316,17 +318,19 @@ Core agent pieces to add:
 
 Recommended implementation order:
 
-1. Add a `findings` table to `JobStore`.
-2. Define a `Finding` schema with stable fingerprinting.
-3. Make review output structured JSON internally, with Markdown generated only
-   at the posting layer.
-4. Add first-class context tools for checks, CODEOWNERS, test results, and file
-   reads.
-5. Add finding reconciliation on new commits: `open`, `resolved`, `ignored`,
-   and `new`.
-6. Move minor fixes into the hosted service as an opt-in GitHub App action.
-7. Add MCP write tools after state tracking exists, such as `create_branch`,
+1. Done: add a `findings` table to `JobStore`.
+2. Done: define a `Finding` schema with stable fingerprinting.
+3. Done: make review output structured JSON internally, with Markdown generated
+   only at the posting layer.
+4. Done: add finding reconciliation on new commits: `open`, `resolved`,
+   `ignored`, and `new`.
+5. Done: add first-class context tools for PR checks, test result summaries,
+   CODEOWNERS, and file reads.
+6. Done: move minor fixes into the hosted service as an opt-in action gated by
+   service and repository config.
+7. Done: add MCP write tools after state tracking exists: `create_branch`,
    `commit_file_change`, `post_review_comment`, and `mark_finding_resolved`.
+8. Add test artifact parsing when projects upload machine-readable test reports.
 
 ## Expanding Beyond PR Review
 

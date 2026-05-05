@@ -5,6 +5,7 @@ from http import HTTPStatus
 from unittest.mock import patch
 
 from build_release_mcp import hosted_service
+from build_release_mcp.findings import Finding
 from build_release_mcp.job_store import JobStore
 
 
@@ -98,6 +99,49 @@ class HostedServiceTests(unittest.TestCase):
 
         self.assertEqual(status, HTTPStatus.FORBIDDEN)
         self.assertEqual(body["error"], "repository is not allowed")
+
+    def test_build_reconciled_review_body_reports_new_and_resolved(self) -> None:
+        first = hosted_service.store.reconcile_findings(
+            repo="owner/repo",
+            pr_number=7,
+            head_sha="abc123",
+            findings=[
+                Finding(
+                    finding_id="one",
+                    severity="high",
+                    path="app.py",
+                    line=3,
+                    summary="Bug",
+                    details="Breaks prod.",
+                    suggested_fix="Guard it.",
+                )
+            ],
+        )
+        body = hosted_service.build_reconciled_review_body(first, "tests not run", "abc123")
+
+        self.assertIn("New findings on this commit", body)
+        self.assertIn("app.py:3", body)
+        self.assertIn("Reviewed commit: `abc123`", body)
+
+        second = hosted_service.store.reconcile_findings(
+            repo="owner/repo",
+            pr_number=7,
+            head_sha="def456",
+            findings=[],
+        )
+        body = hosted_service.build_reconciled_review_body(second, "", "def456")
+
+        self.assertIn("No new findings", body)
+        self.assertIn("Resolved findings", body)
+
+    @patch.dict(os.environ, {"HOSTED_SERVICE_ENABLE_MINOR_FIXES": "true"}, clear=False)
+    def test_minor_fixes_require_env_and_repo_opt_in(self) -> None:
+        self.assertFalse(hosted_service.minor_fixes_enabled({}))
+        self.assertTrue(
+            hosted_service.minor_fixes_enabled(
+                {"pr_review": {"minor_fixes_enabled": True}}
+            )
+        )
 
 
 if __name__ == "__main__":
