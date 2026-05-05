@@ -1,0 +1,73 @@
+name: AI Minor Fixes
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "Pull request number to patch"
+        required: true
+      instructions:
+        description: "Optional fix instructions"
+        required: false
+        default: "Apply only minor, safe fixes for clear PR review findings."
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: ai-minor-fixes-${{ inputs.pr }}
+  cancel-in-progress: false
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout trusted agent code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: agent
+
+      - name: Checkout PR workspace
+        uses: actions/checkout@v4
+        with:
+          path: target
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Checkout PR branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr }}
+        working-directory: target
+        run: gh pr checkout "$PR_NUMBER"
+
+      - name: Configure Git author
+        working-directory: target
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Apply minor fixes
+        working-directory: agent
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5' }}
+          BUILD_RELEASE_MCP_REPO_ROOT: ${{ github.workspace }}/target
+          AI_REVIEW_MAX_DIFF_BYTES: "180000"
+          AI_FIX_INSTRUCTIONS: ${{ inputs.instructions }}
+          PR_NUMBER: ${{ inputs.pr }}
+        run: |
+          PR_URL="$(gh pr view "$PR_NUMBER" --json url --jq .url)"
+          python3 -m build_release_mcp.fix_runner "$PR_URL" \
+            --instructions "$AI_FIX_INSTRUCTIONS" \
+            --post-comment \
+            --push

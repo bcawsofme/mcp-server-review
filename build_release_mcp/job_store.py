@@ -9,6 +9,17 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+try:
+    from .findings import Finding
+    from .reconciliation import (
+        FindingReconciliation,
+        StoredFinding,
+        reconcile_findings,
+    )
+except ImportError:
+    from findings import Finding
+    from reconciliation import FindingReconciliation, StoredFinding, reconcile_findings
+
 
 @dataclass
 class ReviewJob:
@@ -65,9 +76,35 @@ class JobStore:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS findings (
+                  id TEXT PRIMARY KEY,
+                  repo TEXT NOT NULL,
+                  pr_number INTEGER NOT NULL,
+                  finding_id TEXT NOT NULL,
+                  first_seen_sha TEXT NOT NULL,
+                  last_seen_sha TEXT NOT NULL,
+                  status TEXT NOT NULL,
+                  severity TEXT NOT NULL,
+                  path TEXT,
+                  line INTEGER,
+                  summary TEXT NOT NULL,
+                  details TEXT NOT NULL,
+                  suggested_fix TEXT,
+                  fix_commit TEXT,
+                  created_at REAL NOT NULL,
+                  updated_at REAL NOT NULL,
+                  UNIQUE(repo, pr_number, finding_id)
+                )
+                """
+            )
 
     def _row_to_job(self, row: sqlite3.Row) -> ReviewJob:
         return ReviewJob(**dict(row))
+
+    def _row_to_finding(self, row: sqlite3.Row) -> StoredFinding:
+        return StoredFinding(**dict(row))
 
     def enqueue(
         self,
@@ -153,3 +190,53 @@ class JobStore:
                 """,
                 (status, error, review_hash, time.time(), job_id),
             )
+
+    def list_findings(
+        self,
+        repo: str,
+        pr_number: int,
+        statuses: set[str] | None = None,
+    ) -> list[StoredFinding]:
+        query = "SELECT * FROM findings WHERE repo = ? AND pr_number = ?"
+        args: list[Any] = [repo, pr_number]
+        if statuses:
+            placeholders = ",".join("?" for _ in statuses)
+            query += f" AND status IN ({placeholders})"
+            args.extend(sorted(statuses))
+        query += " ORDER BY created_at ASC"
+        with self.connect() as conn:
+            rows = conn.execute(query, args).fetchall()
+        return [self._row_to_finding(row) for row in rows]
+
+    def set_finding_status(
+        self,
+        repo: str,
+        pr_number: int,
+        finding_id: str,
+        status: str,
+    ) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE findings
+                SET status = ?, updated_at = ?
+                WHERE repo = ? AND pr_number = ? AND finding_id = ?
+                """,
+                (status, time.time(), repo, pr_number, finding_id),
+            )
+
+    def reconcile_findings(
+        self,
+        *,
+        repo: str,
+        pr_number: int,
+        head_sha: str,
+        findings: list[Finding],
+    ) -> FindingReconciliation:
+        return reconcile_findings(
+            self,
+            repo=repo,
+            pr_number=pr_number,
+            head_sha=head_sha,
+            findings=findings,
+        )

@@ -19,8 +19,16 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout trusted agent code
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+          path: agent
+
+      - name: Checkout PR workspace
+        uses: actions/checkout@v4
+        with:
+          path: target
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -28,13 +36,13 @@ jobs:
           python-version: "3.12"
 
       - name: Run AI PR review
+        working-directory: agent
         env:
           GH_TOKEN: ${{ github.token }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5' }}
-          BUILD_RELEASE_MCP_REPO_ROOT: ${{ github.workspace }}
+          BUILD_RELEASE_MCP_REPO_ROOT: ${{ github.workspace }}/target
           AI_REVIEW_MAX_DIFF_BYTES: "180000"
+          PR_URL: ${{ github.event.pull_request.html_url }}
         run: |
-          python3 -m build_release_mcp.review_runner \
-            "${{ github.event.pull_request.html_url }}" \
-            --post-comment
+          python3 -m build_release_mcp.review_runner "$PR_URL" --post-comment

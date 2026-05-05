@@ -9,7 +9,6 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -22,10 +21,17 @@ from .config import (
     review_max_diff_bytes,
     review_model,
 )
+from .github_writer import COMMENT_MARKER, parse_pr_url, post_comment
+from .review_engine import (
+    ReviewResult,
+    build_review_prompt,
+    build_structured_review_prompt,
+    parse_structured_review,
+    render_findings_markdown,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
-COMMENT_MARKER = "<!-- ai-pr-review:build-release-mcp -->"
 
 
 class RunnerError(Exception):
@@ -120,9 +126,18 @@ def collect_pr_context(
     client = McpClient(extra_env=extra_env)
     try:
         client.request("initialize")
+        files = client.call_tool("pr_files", {"pr": pr})
+        paths = [
+            item.get("path") or item.get("filename")
+            for item in files
+            if isinstance(item, dict) and (item.get("path") or item.get("filename"))
+        ]
         return {
             "overview": client.call_tool("pr_overview", {"pr": pr}),
-            "files": client.call_tool("pr_files", {"pr": pr}),
+            "files": files,
+            "check_runs": client.call_tool("pr_check_runs", {"pr": pr}),
+            "test_results": client.call_tool("pr_test_results", {"pr": pr}),
+            "codeowners": client.call_tool("pr_codeowners", {"paths": paths}),
             "review_threads": client.call_tool(
                 "pr_review_threads", {"pr": pr, "unresolved_only": True}
             ),
@@ -160,25 +175,6 @@ def apply_review_config(context: dict[str, Any], config: dict[str, Any]) -> dict
     return updated
 
 
-def build_review_prompt(context: dict[str, Any], config: dict[str, Any] | None = None) -> str:
-    config = config or {}
-    return "\n\n".join(
-        [
-            "Review this GitHub pull request.",
-            "Prioritize correctness bugs, regressions, security issues, data loss, race conditions, missing migrations, and missing tests.",
-            "Do not lead with style preferences or broad refactors.",
-            "Return Markdown. If you find issues, use severity-ordered bullets with file paths and line references when possible.",
-            "If you do not find blocking issues, say that clearly and mention residual risk.",
-            f"PR overview:\n```json\n{json.dumps(context['overview'], indent=2, sort_keys=True)}\n```",
-            f"Changed files:\n```json\n{json.dumps(context['files'], indent=2, sort_keys=True)}\n```",
-            f"Ignored files from config:\n```json\n{json.dumps(context.get('ignored_files', []), indent=2, sort_keys=True)}\n```",
-            f"Review config:\n```json\n{json.dumps(config, indent=2, sort_keys=True)}\n```",
-            f"Unresolved review threads:\n```json\n{json.dumps(context['review_threads'], indent=2, sort_keys=True)}\n```",
-            f"Diff:\n```diff\n{context['diff'].get('text', '')}\n```",
-        ]
-    )
-
-
 def extract_output_text(response: dict[str, Any]) -> str:
     output_text = response.get("output_text")
     if isinstance(output_text, str) and output_text.strip():
@@ -197,7 +193,10 @@ def extract_output_text(response: dict[str, Any]) -> str:
 
 
 def call_openai(
-    prompt: str, extra_env: dict[str, str] | None = None, model_override: str | None = None
+    prompt: str,
+    extra_env: dict[str, str] | None = None,
+    model_override: str | None = None,
+    system_instructions: str = "You are a senior engineer performing a concise, bug-focused pull request review.",
 ) -> str:
     env = os.environ.copy()
     if extra_env:
@@ -211,7 +210,7 @@ def call_openai(
     max_output_tokens = int(env.get("AI_REVIEW_MAX_OUTPUT_TOKENS", "1800"))
     payload = {
         "model": model,
-        "instructions": "You are a senior engineer performing a concise, bug-focused pull request review.",
+        "instructions": system_instructions,
         "input": prompt,
         "max_output_tokens": max_output_tokens,
     }
@@ -237,87 +236,6 @@ def call_openai(
     return extract_output_text(json.loads(body))
 
 
-def parse_pr_url(pr: str) -> tuple[str, str, int] | None:
-    marker = "https://github.com/"
-    if not pr.startswith(marker):
-        return None
-    parts = pr.removeprefix(marker).split("/")
-    if len(parts) >= 4 and parts[2] == "pull" and parts[3].isdigit():
-        return parts[0], parts[1], int(parts[3])
-    return None
-
-
-def _gh_json(args: list[str], extra_env: dict[str, str] | None = None) -> Any:
-    env = os.environ.copy()
-    if extra_env:
-        env.update(extra_env)
-    completed = subprocess.run(args, env=env, text=True, capture_output=True, check=False)
-    if completed.returncode != 0:
-        raise RunnerError(completed.stderr.strip() or completed.stdout.strip())
-    return json.loads(completed.stdout or "null")
-
-
-def _find_existing_comment(owner: str, repo: str, number: int, extra_env: dict[str, str] | None) -> int | None:
-    comments = _gh_json(
-        [
-            "gh",
-            "api",
-            "--paginate",
-            f"repos/{owner}/{repo}/issues/{number}/comments",
-        ],
-        extra_env=extra_env,
-    )
-    if not isinstance(comments, list):
-        return None
-    for comment in comments:
-        if COMMENT_MARKER in str(comment.get("body", "")):
-            return int(comment["id"])
-    return None
-
-
-def post_comment(pr: str, body: str, extra_env: dict[str, str] | None = None) -> None:
-    parsed = parse_pr_url(pr)
-    if parsed:
-        owner, repo, number = parsed
-        existing = _find_existing_comment(owner, repo, number, extra_env)
-        if existing is not None:
-            env = os.environ.copy()
-            if extra_env:
-                env.update(extra_env)
-            subprocess.run(
-                [
-                    "gh",
-                    "api",
-                    "--method",
-                    "PATCH",
-                    f"repos/{owner}/{repo}/issues/comments/{existing}",
-                    "-f",
-                    f"body={body}",
-                ],
-                env=env,
-                cwd=os.environ.get("BUILD_RELEASE_MCP_REPO_ROOT") or os.getcwd(),
-                check=True,
-            )
-            return
-
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as file:
-        file.write(body)
-        path = file.name
-
-    try:
-        env = os.environ.copy()
-        if extra_env:
-            env.update(extra_env)
-        subprocess.run(
-            ["gh", "pr", "comment", pr, "--body-file", path],
-            env=env,
-            cwd=os.environ.get("BUILD_RELEASE_MCP_REPO_ROOT") or os.getcwd(),
-            check=True,
-        )
-    finally:
-        Path(path).unlink(missing_ok=True)
-
-
 def run_review(
     pr: str,
     post: bool = False,
@@ -325,21 +243,46 @@ def run_review(
     extra_env: dict[str, str] | None = None,
     config: dict[str, Any] | None = None,
 ) -> str:
+    return run_structured_review(
+        pr,
+        post=post,
+        max_diff_bytes=max_diff_bytes,
+        extra_env=extra_env,
+        config=config,
+    ).body
+
+
+def run_structured_review(
+    pr: str,
+    post: bool = False,
+    max_diff_bytes: int = 180_000,
+    extra_env: dict[str, str] | None = None,
+    config: dict[str, Any] | None = None,
+) -> ReviewResult:
     config = config if config is not None else load_local_config()
     if not review_enabled(config):
         raise RunnerError("PR review is disabled by configuration")
 
     max_diff_bytes = review_max_diff_bytes(config, max_diff_bytes)
     context = apply_review_config(collect_pr_context(pr, max_diff_bytes, extra_env), config)
-    review = call_openai(
-        build_review_prompt(context, config),
+    raw_review = call_openai(
+        build_structured_review_prompt(context, config),
         extra_env=extra_env,
         model_override=review_model(config),
+        system_instructions=(
+            "You are a senior engineer performing a concise, bug-focused pull request review. "
+            "Return only valid JSON for the requested schema."
+        ),
     )
+    try:
+        findings, residual_risk = parse_structured_review(raw_review)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise RunnerError(f"OpenAI response did not contain valid review JSON: {exc}") from exc
+    review = render_findings_markdown(findings, residual_risk)
     body = f"{COMMENT_MARKER}\n\n## AI PR Review\n\n{review}\n"
     if post:
         post_comment(pr, body, extra_env=extra_env)
-    return body
+    return ReviewResult(body=body, findings=findings, residual_risk=residual_risk)
 
 
 def review_hash(body: str) -> str:

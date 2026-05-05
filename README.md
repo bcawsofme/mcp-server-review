@@ -29,6 +29,12 @@ PR review is one tool group:
 - `pr_diff`: full PR diff, truncated to a configurable byte limit.
 - `pr_review_threads`: review threads, defaulting to unresolved inline comments.
 
+Manual minor-fix runner:
+
+- `build-release-mcp-fix`: collects PR context, asks the model for a minimal
+  unified diff, validates it with `git apply --check`, commits it, and
+  optionally pushes it back to the checked-out PR branch.
+
 Prompts:
 
 - `review_pr`: guides a model through a bug-focused PR review.
@@ -199,7 +205,8 @@ jobs:
 
 This repository includes that workflow at
 `.github/workflows/ai-pr-review.yml` and the runner at
-`build_release_mcp/review_runner.py`.
+`build_release_mcp/review_runner.py`. The included workflow checks out trusted
+agent code separately from the PR workspace before running the model call.
 
 To enable it in a repository:
 
@@ -217,6 +224,27 @@ secrets. Prefer reading diffs and metadata only, or design a sandbox
 deliberately. Avoid `pull_request_target` unless you understand the security
 tradeoffs. The included workflow runs only for non-draft PRs from the same
 repository, so it does not expose model API secrets to forked PRs.
+
+### Manual Minor Fixes Bot
+
+For implementation, use the included manual workflow at
+`.github/workflows/ai-minor-fixes.yml`.
+
+This workflow is intentionally `workflow_dispatch` only. It checks out the PR
+branch, asks the model for a minimal patch, validates the patch with
+`git apply --check`, commits it as `Apply AI minor fixes`, pushes it to the PR
+branch, and posts a status comment.
+
+To run it:
+
+1. Open GitHub Actions.
+2. Choose `AI Minor Fixes`.
+3. Enter the PR number and optional instructions.
+4. Run the workflow.
+
+Use this for small, low-risk fixes only. The runner refuses to start with a
+dirty worktree and only applies a model response that is a valid unified diff.
+It is not designed for broad refactors or untrusted fork PRs.
 
 ### Hosted Service
 
@@ -240,6 +268,86 @@ This repository includes a hosted webhook service implementation. See
 The hosted service now includes GitHub App token support, SQLite-backed job
 state, webhook idempotency, repository-level config, and update-in-place PR
 comments.
+
+## PR Review Agent Roadmap
+
+This repository is the start of a PR Review Agent, but it is not yet the full
+automated fix loop. The current implementation can collect PR context, run an
+AI review, normalize findings, persist finding state, reconcile findings across
+new PR commits, post/update a review comment, and run a manual minor-fix
+workflow.
+
+The target flow is:
+
+```text
+PR opened or updated
+  -> GitHub App webhook receiver
+  -> worker queue
+  -> PR Review Agent
+  -> MCP tools collect PR context
+  -> review engine creates findings
+  -> state DB tracks finding lifecycle
+  -> optional fix agent creates a branch or commit
+  -> GitHub API posts review output
+  -> new PR commits trigger reconciliation
+```
+
+The hosted service should own orchestration, permissions, queueing, state, and
+GitHub App lifecycle. MCP should be the agent tool boundary: narrow tools expose
+repository, PR, CI, ownership, and write operations to the agent without making
+the model responsible for service control flow or persistence.
+
+Current implementation boundaries:
+
+- `hosted_service.py`: webhook handling, queue orchestration, GitHub App auth,
+  and hosted review/fix workflow control.
+- `server.py`: MCP tool boundary for PR context, CI context, repository reads,
+  branch/file writes, review comments, and finding status updates.
+- `review_runner.py`: CLI runner that collects MCP context, calls the model, and
+  delegates review-specific parsing/rendering.
+- `review_engine.py`: review prompts, structured finding parsing, and Markdown
+  rendering.
+- `findings.py`: finding schema, statuses, normalization, and stable
+  fingerprinting.
+- `reconciliation.py`: finding lifecycle reconciliation across PR commits.
+- `job_store.py`: SQLite-backed job and finding persistence.
+- `github_writer.py`: GitHub PR comment create/update helpers.
+- `fix_runner.py`: opt-in minor fix generation and guarded patch application.
+
+Core agent pieces:
+
+1. Context Collector
+   - PR diff, changed files, check runs, CODEOWNERS, previous comments, test
+     results, relevant file contents, and repository config.
+2. Review Engine
+   - Structured findings for real issues only: bugs, missing tests, security
+     concerns, deployment or release risk, broken CI, and ownership gaps.
+3. State Store
+   - PR number, reviewed commit SHA, finding ID, file/line, issue summary,
+     status (`open`, `resolved`, `ignored`), and fix commit when available.
+4. Fix Agent
+   - Safe, opt-in fixes such as small bug fixes, test updates, config fixes,
+     docs updates, or changelog updates.
+5. Feedback Loop
+   - On every new commit, compare against previous findings, mark resolved
+     items, keep unresolved items, honor ignored items, and comment only on new
+     or materially changed findings.
+
+Recommended implementation order:
+
+1. Done: add a `findings` table to `JobStore`.
+2. Done: define a `Finding` schema with stable fingerprinting.
+3. Done: make review output structured JSON internally, with Markdown generated
+   only at the posting layer.
+4. Done: add finding reconciliation on new commits: `open`, `resolved`,
+   `ignored`, and `new`.
+5. Done: add first-class context tools for PR checks, test result summaries,
+   CODEOWNERS, and file reads.
+6. Done: move minor fixes into the hosted service as an opt-in action gated by
+   service and repository config.
+7. Done: add MCP write tools after state tracking exists: `create_branch`,
+   `commit_file_change`, `post_review_comment`, and `mark_finding_resolved`.
+8. Add test artifact parsing when projects upload machine-readable test reports.
 
 ## Expanding Beyond PR Review
 
