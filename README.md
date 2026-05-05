@@ -1,8 +1,15 @@
 # Build And Release MCP Server
 
-A stdio MCP server for build, release, and GitHub pull request operations.
-It uses local CLIs such as `gh`, `git`, `kubectl`, and `docker`, so it has no
-third-party Python runtime dependencies.
+A build and release MCP server focused on powering a stateful AI PR review bot.
+
+The main workflow collects GitHub PR context, runs an AI review, tracks
+findings across commits, updates PR comments, and can optionally apply small
+safe fixes. MCP is the tool boundary between the agent and GitHub/repository
+operations.
+
+The server also exposes supporting build and release tools through local CLIs
+such as `gh`, `git`, `kubectl`, and `docker`, so it has no third-party Python
+runtime dependencies.
 
 ## What It Does
 
