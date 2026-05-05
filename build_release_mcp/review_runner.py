@@ -9,14 +9,11 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .findings import Finding, coerce_findings, extract_json_object
 from .config import (
     load_local_config,
     review_enabled,
@@ -24,21 +21,21 @@ from .config import (
     review_max_diff_bytes,
     review_model,
 )
+from .github_writer import COMMENT_MARKER, parse_pr_url, post_comment
+from .review_engine import (
+    ReviewResult,
+    build_review_prompt,
+    build_structured_review_prompt,
+    parse_structured_review,
+    render_findings_markdown,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
-COMMENT_MARKER = "<!-- ai-pr-review:build-release-mcp -->"
 
 
 class RunnerError(Exception):
     """A user-facing runner failure."""
-
-
-@dataclass
-class ReviewResult:
-    body: str
-    findings: list[Finding]
-    residual_risk: str
 
 
 class McpClient:
@@ -178,87 +175,6 @@ def apply_review_config(context: dict[str, Any], config: dict[str, Any]) -> dict
     return updated
 
 
-def build_review_prompt(context: dict[str, Any], config: dict[str, Any] | None = None) -> str:
-    config = config or {}
-    return "\n\n".join(
-        [
-            "Review this GitHub pull request.",
-            "Prioritize correctness bugs, regressions, security issues, data loss, race conditions, missing migrations, and missing tests.",
-            "Do not lead with style preferences or broad refactors.",
-            "Return Markdown. If you find issues, use severity-ordered bullets with file paths and line references when possible.",
-            "For each actionable issue, include a concise suggested fix when the fix is clear.",
-            "If you do not find blocking issues, say that clearly and mention residual risk.",
-            f"PR overview:\n```json\n{json.dumps(context['overview'], indent=2, sort_keys=True)}\n```",
-            f"Changed files:\n```json\n{json.dumps(context['files'], indent=2, sort_keys=True)}\n```",
-            f"Check runs:\n```json\n{json.dumps(context.get('check_runs', {}), indent=2, sort_keys=True)}\n```",
-            f"Test results:\n```json\n{json.dumps(context.get('test_results', {}), indent=2, sort_keys=True)}\n```",
-            f"CODEOWNERS matches:\n```json\n{json.dumps(context.get('codeowners', {}), indent=2, sort_keys=True)}\n```",
-            f"Ignored files from config:\n```json\n{json.dumps(context.get('ignored_files', []), indent=2, sort_keys=True)}\n```",
-            f"Review config:\n```json\n{json.dumps(config, indent=2, sort_keys=True)}\n```",
-            f"Unresolved review threads:\n```json\n{json.dumps(context['review_threads'], indent=2, sort_keys=True)}\n```",
-            f"Diff:\n```diff\n{context['diff'].get('text', '')}\n```",
-        ]
-    )
-
-
-def build_structured_review_prompt(
-    context: dict[str, Any], config: dict[str, Any] | None = None
-) -> str:
-    config = config or {}
-    return "\n\n".join(
-        [
-            "Review this GitHub pull request and return structured JSON only.",
-            "Find only real issues: correctness bugs, regressions, security issues, data loss, race conditions, missing migrations, broken CI, ownership gaps, deployment or release risk, and missing tests.",
-            "Do not include style preferences, speculative broad refactors, or praise.",
-            "Return this JSON shape exactly:",
-            '{"findings":[{"severity":"critical|high|medium|low","path":"path or null","line":123,"summary":"short issue","details":"why this matters","suggested_fix":"clear fix or null"}],"residual_risk":"short note when no blocking issues or remaining uncertainty"}',
-            "Use an empty findings array when no actionable issues are found.",
-            "Do not wrap the JSON in Markdown.",
-            f"PR overview:\n```json\n{json.dumps(context['overview'], indent=2, sort_keys=True)}\n```",
-            f"Changed files:\n```json\n{json.dumps(context['files'], indent=2, sort_keys=True)}\n```",
-            f"Check runs:\n```json\n{json.dumps(context.get('check_runs', {}), indent=2, sort_keys=True)}\n```",
-            f"Test results:\n```json\n{json.dumps(context.get('test_results', {}), indent=2, sort_keys=True)}\n```",
-            f"CODEOWNERS matches:\n```json\n{json.dumps(context.get('codeowners', {}), indent=2, sort_keys=True)}\n```",
-            f"Ignored files from config:\n```json\n{json.dumps(context.get('ignored_files', []), indent=2, sort_keys=True)}\n```",
-            f"Review config:\n```json\n{json.dumps(config, indent=2, sort_keys=True)}\n```",
-            f"Unresolved review threads:\n```json\n{json.dumps(context['review_threads'], indent=2, sort_keys=True)}\n```",
-            f"Diff:\n```diff\n{context['diff'].get('text', '')}\n```",
-        ]
-    )
-
-
-def parse_structured_review(text: str) -> tuple[list[Finding], str]:
-    try:
-        payload = extract_json_object(text)
-    except (json.JSONDecodeError, TypeError) as exc:
-        raise RunnerError(f"OpenAI response did not contain valid review JSON: {exc}") from exc
-    findings = coerce_findings(payload.get("findings"))
-    residual_risk = str(payload.get("residual_risk") or "").strip()
-    return findings, residual_risk
-
-
-def render_findings_markdown(findings: list[Finding], residual_risk: str = "") -> str:
-    if not findings:
-        risk = residual_risk or "No blocking issues found from the provided PR context."
-        return f"No blocking issues found.\n\nResidual risk: {risk}"
-
-    severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
-    ordered = sorted(findings, key=lambda item: severity_order.get(item.severity, 99))
-    lines = ["Findings:"]
-    for finding in ordered:
-        location = finding.path or "unknown file"
-        if finding.line:
-            location = f"{location}:{finding.line}"
-        lines.append(f"- **{finding.severity.upper()}** `{location}` - {finding.summary}")
-        if finding.details:
-            lines.append(f"  {finding.details}")
-        if finding.suggested_fix:
-            lines.append(f"  Suggested fix: {finding.suggested_fix}")
-    if residual_risk:
-        lines.extend(["", f"Residual risk: {residual_risk}"])
-    return "\n".join(lines)
-
-
 def extract_output_text(response: dict[str, Any]) -> str:
     output_text = response.get("output_text")
     if isinstance(output_text, str) and output_text.strip():
@@ -320,98 +236,6 @@ def call_openai(
     return extract_output_text(json.loads(body))
 
 
-def parse_pr_url(pr: str) -> tuple[str, str, int] | None:
-    marker = "https://github.com/"
-    if not pr.startswith(marker):
-        return None
-    parts = pr.removeprefix(marker).split("/")
-    if len(parts) >= 4 and parts[2] == "pull" and parts[3].isdigit():
-        return parts[0], parts[1], int(parts[3])
-    return None
-
-
-def _gh_json(args: list[str], extra_env: dict[str, str] | None = None) -> Any:
-    env = os.environ.copy()
-    if extra_env:
-        env.update(extra_env)
-    completed = subprocess.run(args, env=env, text=True, capture_output=True, check=False)
-    if completed.returncode != 0:
-        raise RunnerError(completed.stderr.strip() or completed.stdout.strip())
-    return json.loads(completed.stdout or "null")
-
-
-def _find_existing_comment(
-    owner: str,
-    repo: str,
-    number: int,
-    extra_env: dict[str, str] | None,
-    marker: str = COMMENT_MARKER,
-) -> int | None:
-    comments = _gh_json(
-        [
-            "gh",
-            "api",
-            "--paginate",
-            f"repos/{owner}/{repo}/issues/{number}/comments",
-        ],
-        extra_env=extra_env,
-    )
-    if not isinstance(comments, list):
-        return None
-    for comment in comments:
-        if marker in str(comment.get("body", "")):
-            return int(comment["id"])
-    return None
-
-
-def post_comment(
-    pr: str,
-    body: str,
-    extra_env: dict[str, str] | None = None,
-    marker: str = COMMENT_MARKER,
-) -> None:
-    parsed = parse_pr_url(pr)
-    if parsed:
-        owner, repo, number = parsed
-        existing = _find_existing_comment(owner, repo, number, extra_env, marker=marker)
-        if existing is not None:
-            env = os.environ.copy()
-            if extra_env:
-                env.update(extra_env)
-            subprocess.run(
-                [
-                    "gh",
-                    "api",
-                    "--method",
-                    "PATCH",
-                    f"repos/{owner}/{repo}/issues/comments/{existing}",
-                    "-f",
-                    f"body={body}",
-                ],
-                env=env,
-                cwd=os.environ.get("BUILD_RELEASE_MCP_REPO_ROOT") or os.getcwd(),
-                check=True,
-            )
-            return
-
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as file:
-        file.write(body)
-        path = file.name
-
-    try:
-        env = os.environ.copy()
-        if extra_env:
-            env.update(extra_env)
-        subprocess.run(
-            ["gh", "pr", "comment", pr, "--body-file", path],
-            env=env,
-            cwd=os.environ.get("BUILD_RELEASE_MCP_REPO_ROOT") or os.getcwd(),
-            check=True,
-        )
-    finally:
-        Path(path).unlink(missing_ok=True)
-
-
 def run_review(
     pr: str,
     post: bool = False,
@@ -450,7 +274,10 @@ def run_structured_review(
             "Return only valid JSON for the requested schema."
         ),
     )
-    findings, residual_risk = parse_structured_review(raw_review)
+    try:
+        findings, residual_risk = parse_structured_review(raw_review)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise RunnerError(f"OpenAI response did not contain valid review JSON: {exc}") from exc
     review = render_findings_markdown(findings, residual_risk)
     body = f"{COMMENT_MARKER}\n\n## AI PR Review\n\n{review}\n"
     if post:

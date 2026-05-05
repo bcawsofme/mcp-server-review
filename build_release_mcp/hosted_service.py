@@ -20,12 +20,11 @@ from .config import ConfigError, get_path, load_repo_config, review_max_diff_byt
 from .findings import Finding
 from .fix_runner import run_minor_fix
 from .github_auth import GitHubAuthError, has_github_app_config, resolve_token
+from .github_writer import COMMENT_MARKER, post_comment
 from .job_store import FindingReconciliation, JobStore, StoredFinding
+from .review_engine import render_findings_markdown
 from .review_runner import (
-    COMMENT_MARKER,
     RunnerError,
-    post_comment,
-    render_findings_markdown,
     review_hash,
     run_structured_review,
 )

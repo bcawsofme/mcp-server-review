@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import Any
 
 from .config import load_local_config, review_enabled, review_max_diff_bytes, review_model
-from .review_runner import RunnerError, apply_review_config, call_openai, collect_pr_context, post_comment
+from .github_writer import post_comment
+from .review_runner import RunnerError, apply_review_config, call_openai, collect_pr_context
 
 
 FIX_COMMENT_MARKER = "<!-- ai-pr-minor-fixes:build-release-mcp -->"

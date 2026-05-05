@@ -297,6 +297,23 @@ GitHub App lifecycle. MCP should be the agent tool boundary: narrow tools expose
 repository, PR, CI, ownership, and write operations to the agent without making
 the model responsible for service control flow or persistence.
 
+Current implementation boundaries:
+
+- `hosted_service.py`: webhook handling, queue orchestration, GitHub App auth,
+  and hosted review/fix workflow control.
+- `server.py`: MCP tool boundary for PR context, CI context, repository reads,
+  branch/file writes, review comments, and finding status updates.
+- `review_runner.py`: CLI runner that collects MCP context, calls the model, and
+  delegates review-specific parsing/rendering.
+- `review_engine.py`: review prompts, structured finding parsing, and Markdown
+  rendering.
+- `findings.py`: finding schema, statuses, normalization, and stable
+  fingerprinting.
+- `reconciliation.py`: finding lifecycle reconciliation across PR commits.
+- `job_store.py`: SQLite-backed job and finding persistence.
+- `github_writer.py`: GitHub PR comment create/update helpers.
+- `fix_runner.py`: opt-in minor fix generation and guarded patch application.
+
 Core agent pieces:
 
 1. Context Collector
