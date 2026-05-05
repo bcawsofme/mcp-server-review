@@ -1,13 +1,22 @@
 # Documentation
 
-This directory breaks the MCP server down by operating area. Start with
-`tool-groups/README.md` when deciding which tools to use.
+This directory breaks the MCP server down by setup path, automation mode, agent
+architecture, and tool group.
 
-## Guides
+## Setup And Operation
+
+- [Quickstart](quickstart.md)
+- [Automation](automation.md)
+- [Hosted Service](hosted-service.md)
+
+## PR Review Agent
+
+- [PR Review Agent Architecture](pr-review-agent.md)
+- [PR Review Tools](tool-groups/pr-review.md)
+
+## Tool Catalog
 
 - [Tool Groups](tool-groups/README.md)
-- [Hosted Service](hosted-service.md)
-- [PR Review](tool-groups/pr-review.md)
 - [CI Diagnostics](tool-groups/ci-diagnostics.md)
 - [Release Readiness](tool-groups/release-readiness.md)
 - [Deployment Status](tool-groups/deployment-status.md)
