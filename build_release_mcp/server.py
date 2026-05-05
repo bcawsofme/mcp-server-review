@@ -416,6 +416,7 @@ Use the PR review MCP tools in this order:
 Review stance:
 - Prioritize correctness bugs, regressions, security issues, data loss, race conditions, missing migrations, and missing tests.
 - Do not lead with style preferences or broad refactors.
+- Include a concise suggested fix for each actionable issue when the fix is clear.
 - Cite exact files and lines when possible.
 - If no blocking issues are found, say that and mention residual risk or unverified tests.
 """.strip()

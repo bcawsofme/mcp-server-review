@@ -168,6 +168,7 @@ def build_review_prompt(context: dict[str, Any], config: dict[str, Any] | None =
             "Prioritize correctness bugs, regressions, security issues, data loss, race conditions, missing migrations, and missing tests.",
             "Do not lead with style preferences or broad refactors.",
             "Return Markdown. If you find issues, use severity-ordered bullets with file paths and line references when possible.",
+            "For each actionable issue, include a concise suggested fix when the fix is clear.",
             "If you do not find blocking issues, say that clearly and mention residual risk.",
             f"PR overview:\n```json\n{json.dumps(context['overview'], indent=2, sort_keys=True)}\n```",
             f"Changed files:\n```json\n{json.dumps(context['files'], indent=2, sort_keys=True)}\n```",
@@ -197,7 +198,10 @@ def extract_output_text(response: dict[str, Any]) -> str:
 
 
 def call_openai(
-    prompt: str, extra_env: dict[str, str] | None = None, model_override: str | None = None
+    prompt: str,
+    extra_env: dict[str, str] | None = None,
+    model_override: str | None = None,
+    system_instructions: str = "You are a senior engineer performing a concise, bug-focused pull request review.",
 ) -> str:
     env = os.environ.copy()
     if extra_env:
@@ -211,7 +215,7 @@ def call_openai(
     max_output_tokens = int(env.get("AI_REVIEW_MAX_OUTPUT_TOKENS", "1800"))
     payload = {
         "model": model,
-        "instructions": "You are a senior engineer performing a concise, bug-focused pull request review.",
+        "instructions": system_instructions,
         "input": prompt,
         "max_output_tokens": max_output_tokens,
     }
@@ -257,7 +261,13 @@ def _gh_json(args: list[str], extra_env: dict[str, str] | None = None) -> Any:
     return json.loads(completed.stdout or "null")
 
 
-def _find_existing_comment(owner: str, repo: str, number: int, extra_env: dict[str, str] | None) -> int | None:
+def _find_existing_comment(
+    owner: str,
+    repo: str,
+    number: int,
+    extra_env: dict[str, str] | None,
+    marker: str = COMMENT_MARKER,
+) -> int | None:
     comments = _gh_json(
         [
             "gh",
@@ -270,16 +280,21 @@ def _find_existing_comment(owner: str, repo: str, number: int, extra_env: dict[s
     if not isinstance(comments, list):
         return None
     for comment in comments:
-        if COMMENT_MARKER in str(comment.get("body", "")):
+        if marker in str(comment.get("body", "")):
             return int(comment["id"])
     return None
 
 
-def post_comment(pr: str, body: str, extra_env: dict[str, str] | None = None) -> None:
+def post_comment(
+    pr: str,
+    body: str,
+    extra_env: dict[str, str] | None = None,
+    marker: str = COMMENT_MARKER,
+) -> None:
     parsed = parse_pr_url(pr)
     if parsed:
         owner, repo, number = parsed
-        existing = _find_existing_comment(owner, repo, number, extra_env)
+        existing = _find_existing_comment(owner, repo, number, extra_env, marker=marker)
         if existing is not None:
             env = os.environ.copy()
             if extra_env:

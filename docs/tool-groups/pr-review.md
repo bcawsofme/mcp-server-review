@@ -83,3 +83,19 @@ Example user request:
 Use the review_pr prompt for https://github.com/OWNER/REPO/pull/123.
 Focus on correctness bugs, rollout risk, and missing tests.
 ```
+
+## Minor Fix Runner
+
+The `build-release-mcp-fix` CLI can apply small fixes after a PR branch is
+checked out:
+
+```sh
+build-release-mcp-fix 123 --instructions "Fix the failing test expectation" --post-comment
+```
+
+It collects the same PR context as the review runner, asks the model for either
+`NO_CHANGES` or a unified diff, validates that diff with `git apply --check`,
+commits successful changes, and can push them with `--push`.
+
+Use the manual `AI Minor Fixes` GitHub Actions workflow when you want the bot to
+patch a PR branch from GitHub.

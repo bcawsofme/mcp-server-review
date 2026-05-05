@@ -29,6 +29,12 @@ PR review is one tool group:
 - `pr_diff`: full PR diff, truncated to a configurable byte limit.
 - `pr_review_threads`: review threads, defaulting to unresolved inline comments.
 
+Manual minor-fix runner:
+
+- `build-release-mcp-fix`: collects PR context, asks the model for a minimal
+  unified diff, validates it with `git apply --check`, commits it, and
+  optionally pushes it back to the checked-out PR branch.
+
 Prompts:
 
 - `review_pr`: guides a model through a bug-focused PR review.
@@ -199,7 +205,8 @@ jobs:
 
 This repository includes that workflow at
 `.github/workflows/ai-pr-review.yml` and the runner at
-`build_release_mcp/review_runner.py`.
+`build_release_mcp/review_runner.py`. The included workflow checks out trusted
+agent code separately from the PR workspace before running the model call.
 
 To enable it in a repository:
 
@@ -217,6 +224,27 @@ secrets. Prefer reading diffs and metadata only, or design a sandbox
 deliberately. Avoid `pull_request_target` unless you understand the security
 tradeoffs. The included workflow runs only for non-draft PRs from the same
 repository, so it does not expose model API secrets to forked PRs.
+
+### Manual Minor Fixes Bot
+
+For implementation, use the included manual workflow at
+`.github/workflows/ai-minor-fixes.yml`.
+
+This workflow is intentionally `workflow_dispatch` only. It checks out the PR
+branch, asks the model for a minimal patch, validates the patch with
+`git apply --check`, commits it as `Apply AI minor fixes`, pushes it to the PR
+branch, and posts a status comment.
+
+To run it:
+
+1. Open GitHub Actions.
+2. Choose `AI Minor Fixes`.
+3. Enter the PR number and optional instructions.
+4. Run the workflow.
+
+Use this for small, low-risk fixes only. The runner refuses to start with a
+dirty worktree and only applies a model response that is a valid unified diff.
+It is not designed for broad refactors or untrusted fork PRs.
 
 ### Hosted Service
 
